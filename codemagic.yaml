@@ -1,14 +1,95 @@
 workflows:
   apk:
-    name: Mis archivos APK
+    name: Nexora APK
     instance_type: mac_mini_m2
     max_build_duration: 30
     scripts:
       - name: Armar proyecto
         script: |
-          mkdir -p src/main/kotlin/com/gestor/archivos
+          mkdir -p src/main/kotlin/com/gestor/archivos src/main/res/mipmap-anydpi-v26 src/main/res/drawable
           cp MainActivity.kt src/main/kotlin/com/gestor/archivos/
           cp AndroidManifest.xml src/main/
+          cat > src/main/res/drawable/ic_bg.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+            <path android:pathData="M0,0h108v108h-108z">
+              <aapt:attr name="android:fillColor">
+                <gradient android:startX="0" android:startY="0" android:endX="108" android:endY="108" android:type="linear">
+                  <item android:offset="0" android:color="#FF070B18"/>
+                  <item android:offset="1" android:color="#FF1B3FA8"/>
+                </gradient>
+              </aapt:attr>
+            </path>
+          </vector>
+          EOF
+          cat > src/main/res/drawable/ic_fg.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+            <path android:pathData="M34,76 L34,32 L44,32 L66,60 L66,32 L74,32 L74,76 L64,76 L42,48 L42,76 Z">
+              <aapt:attr name="android:fillColor">
+                <gradient android:startX="34" android:startY="32" android:endX="74" android:endY="76" android:type="linear">
+                  <item android:offset="0" android:color="#FF67E8F9"/>
+                  <item android:offset="1" android:color="#FF3D7BFF"/>
+                </gradient>
+              </aapt:attr>
+            </path>
+          </vector>
+          EOF
+          cat > src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@drawable/ic_bg"/>
+            <foreground android:drawable="@drawable/ic_fg"/>
+          </adaptive-icon>
+          EOF
+          cat > nexora.b64 <<'EOF'
+          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
+          EOF
+          openssl base64 -d -in nexora.b64 -out nexora.keystore
       - name: Compilar APK
         script: |
           curl -sL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o gradle.zip

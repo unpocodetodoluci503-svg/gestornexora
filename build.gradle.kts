@@ -11,8 +11,16 @@ android {
         applicationId = "com.gestor.archivos"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
+    }
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("nexora.keystore")
+            storePassword = "nexora123"
+            keyAlias = "nexora"
+            keyPassword = "nexora123"
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
