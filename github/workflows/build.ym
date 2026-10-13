@@ -1,1 +1,32 @@
+name: Compilar APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Armar proyecto y compilar
+        run: |
+          mkdir -p src/main/kotlin/com/gestor/archivos
+          cp MainActivity.kt src/main/kotlin/com/gestor/archivos/
+          cp AndroidManifest.xml src/main/
+          gradle assembleDebug --no-daemon
+      - name: Publicar APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ github.run_number }}" build/outputs/apk/debug/*.apk \
+            --title "Mis archivos v${{ github.run_number }}" \
+            --notes "APK listo para instalar"
 
