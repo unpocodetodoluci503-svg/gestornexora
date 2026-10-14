@@ -7,6 +7,7 @@ import android.content.ClipData
 import android.content.ContentProvider
 import android.content.ContentValues
 import android.content.Context
+import android.content.res.ColorStateList
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.database.Cursor
@@ -24,8 +25,14 @@ import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
 import android.media.ExifInterface
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -43,6 +50,9 @@ import android.webkit.MimeTypeMap
 import android.widget.*
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -161,7 +171,20 @@ class MainActivity : Activity() {
                     "Barra de selección compacta con Cancelar y Acciones",
                     "El menú se coloca arriba o abajo según el espacio y no se sale de la pantalla")),
                 Seccion("Mejoras", listOf(
-                    "Las carpetas tienen su menú con Abrir, Renombrar y Eliminar"))))
+                    "Las carpetas tienen su menú con Abrir, Renombrar y Eliminar")))),
+        Entrada("0.3.8", null, "Convertidor de archivos",
+            "Convierte imágenes, audio y PDF sin salir de Nexora y sin subir nada a internet.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Convertidor de imágenes entre JPG, PNG y WebP, con calidad y color de fondo para las transparencias",
+                    "Imágenes a PDF, una por una o unidas en un solo PDF",
+                    "Páginas de un PDF a imágenes PNG o JPG, con la resolución que elijas",
+                    "Audio a M4A (AAC) o WAV, con elección de bitrate")),
+                Seccion("Mejoras", listOf(
+                    "Convertir formato en el menú de los archivos compatibles, también para varios a la vez",
+                    "Progreso y resultado de cada archivo; si uno falla, sigue con los demás",
+                    "Los originales no se tocan y nunca se sobrescribe: si el nombre ya existe se agrega (1)",
+                    "Todo se procesa dentro del teléfono"))))
     )
 
     private val pendientes = listOf(
@@ -170,6 +193,9 @@ class MainActivity : Activity() {
         "Renombre múltiple de carpetas: se evaluará como mejora futura.",
         "Copiar, mover y compartir carpetas: por ahora solo funcionan con archivos.",
         "Miniaturas de videos: por ahora solo se muestran las de imágenes.",
+        "Convertir a MP3: Android no incluye codificador de MP3 y Nexora no tiene una biblioteca para ello.",
+        "Convertir videos: requiere una biblioteca adicional (por ejemplo Media3 Transformer) que todavía no está incorporada.",
+        "PDF a Word y otros documentos: no se puede conservar el formato con las herramientas actuales.",
         "Vista en cuadrícula: aún no existe.",
         "Extraer RAR y 7z: por ahora solo se extraen ZIP."
     )
@@ -220,6 +246,21 @@ class MainActivity : Activity() {
     private lateinit var selWrap: HorizontalScrollView
     private var menuPop: PopupWindow? = null
     private var menuClosedAt = 0L
+    private val convFiles = ArrayList<File>()
+    private var convDest: File? = null
+    private var convTarget = 0
+    private var convQuality = 90
+    private var convBg = Color.WHITE
+    private var convMerge = true
+    private var convName = ""
+    private var convBitrateIdx = 1
+    private var convDpiIdx = 1
+    private var convPdfDimIdx = 1
+    @Volatile private var convCancel = false
+    private var converting = false
+    private var convHead: TextView? = null
+    private var convOverall: ProgressBar? = null
+    private var pageScroll: ScrollView? = null
     private val dateFull = SimpleDateFormat("d MMM yyyy, HH:mm", Locale("es"))
     private val thumbPx: Int get() = dp(52)
     private val memCache = object : android.util.LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 10).toInt()) {
@@ -516,6 +557,7 @@ class MainActivity : Activity() {
         bar.setOnClickListener { closeViewer() }
         val sv = ScrollView(this)
         sv.addView(content)
+        pageScroll = sv
         col.addView(bar, lp(-1, -2))
         col.addView(sv, lp(-1, 0, 1f))
         setContentView(withBg(col))
@@ -1138,6 +1180,7 @@ class MainActivity : Activity() {
         out.add(MEntry(7, "Mover a…", false, 1, false) { chooseDest(files, true) })
         if (one) out.add(MEntry(8, "Renombrar", false, 1, false) { rename(f0) })
         else out.add(MEntry(8, "Renombre múltiple", false, 1, false) { renameMultiSheet() })
+        if (files.all { convKind(it) > 0 } && files.map { convKind(it) }.distinct().size == 1) out.add(MEntry(17, "Convertir formato", false, 1, false) { openConverter(files) })
         out.add(MEntry(9, "Información", false, 2, false) { infoSheet(files) })
         if (items.count { it.cat >= 0 } > selected.size) out.add(MEntry(10, "Seleccionar todo", false, 2, false) { selectAll() })
         out.add(MEntry(11, if (one) "Eliminar" else "Eliminar " + files.size + " archivos", true, 3, false) { confirmDeleteFiles(files) })
@@ -1167,8 +1210,9 @@ class MainActivity : Activity() {
     private fun dotsEntries(): List<MEntry> = listOf(
         MEntry(0, "Perfil", false, 0, false) { showProfile() },
         MEntry(1, "Novedades", false, 0, hasUnseen()) { showNews() },
-        MEntry(2, "Personalización", false, 0, false) { showPersonalization() },
-        MEntry(3, "Configuración", false, 0, false) { showSettings() }
+        MEntry(17, "Convertidor", false, 1, false) { openConverter(null) },
+        MEntry(2, "Personalización", false, 2, false) { showPersonalization() },
+        MEntry(3, "Configuración", false, 2, false) { showSettings() }
     )
 
     private fun openMenu(anchor: View, title: String?, entries: List<MEntry>) {
@@ -1294,14 +1338,39 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun dirRow(label: String, onClick: () -> Unit): View {
+        val row = LinearLayout(this)
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(14), dp(9), dp(14), dp(9))
+        row.addView(FolderIcon(this, ACC), lp(dp(26), dp(26)))
+        val t = txt(label, 15f, TXT)
+        t.isSingleLine = true
+        t.ellipsize = TextUtils.TruncateAt.END
+        row.addView(t, lp(0, -2, 1f).also { it.leftMargin = dp(12) })
+        row.setOnClickListener { onClick() }
+        return row
+    }
+
     private fun chooseDest(files: List<File>, move: Boolean) {
         val verb = if (move) "Mover" else "Copiar"
         val src = files[0].parentFile
+        pickFolder(verb + " " + (if (files.size == 1) files[0].name else files.size.toString() + " archivos") + " a…", verb + " aquí", dir) { cur ->
+            if (cur.canonicalPath == src?.canonicalPath) {
+                toast("Elige una carpeta distinta a la actual")
+                false
+            } else {
+                transfer(files, cur, move)
+                true
+            }
+        }
+    }
+
+    private fun pickFolder(title: String, confirm: String, start: File, onPick: (File) -> Boolean) {
         showSheet { d ->
-            var cur: File = dir
+            var cur: File = if (start.isDirectory) start else dir
             val col = LinearLayout(this)
             col.orientation = LinearLayout.VERTICAL
-            col.addView(txt(verb + " " + (if (files.size == 1) files[0].name else files.size.toString() + " archivos") + " a…", 18f, TXT, true))
+            col.addView(txt(title, 18f, TXT, true))
             val pathT = txt("", 12f, ACC2)
             pathT.setPadding(dp(12), dp(6), dp(12), dp(6))
             pathT.background = rounded(alpha(ACC, 0x33), 12)
@@ -1316,7 +1385,7 @@ class MainActivity : Activity() {
                 pathT.text = "Almacenamiento interno" + cur.absolutePath.removePrefix(root.absolutePath)
                 listBox.removeAllViews()
                 if (cur != root && cur.parentFile != null) {
-                    val up = optionRow("⬆  Subir", false)
+                    val up = optionRow("‹  Subir", false)
                     up.setOnClickListener {
                         cur = cur.parentFile ?: root
                         render()
@@ -1325,12 +1394,10 @@ class MainActivity : Activity() {
                 }
                 val subs = (cur.listFiles() ?: emptyArray<File>()).filter { it.isDirectory }.sortedBy { it.name.lowercase() }
                 for (sf in subs) {
-                    val r = optionRow("📁  " + sf.name, false)
-                    r.setOnClickListener {
+                    listBox.addView(dirRow(sf.name) {
                         cur = sf
                         render()
-                    }
-                    listBox.addView(r, lp(-1, -2).also { it.topMargin = dp(4) })
+                    }, lp(-1, -2).also { it.topMargin = dp(2) })
                 }
                 if (subs.isEmpty()) listBox.addView(txt("No hay subcarpetas aquí", 13f, MUTE), lp(-2, -2).also { it.topMargin = dp(8) })
             }
@@ -1338,14 +1405,9 @@ class MainActivity : Activity() {
             val btns = LinearLayout(this)
             val no = ghostButton("Cancelar")
             no.setOnClickListener { d.dismiss() }
-            val yes = primaryButton(verb + " aquí")
+            val yes = primaryButton(confirm)
             yes.setOnClickListener {
-                if (cur.canonicalPath == src?.canonicalPath) {
-                    toast("Elige una carpeta distinta a la actual")
-                } else {
-                    d.dismiss()
-                    transfer(files, cur, move)
-                }
+                if (onPick(cur)) d.dismiss()
             }
             btns.addView(no, lp(0, dp(48), 1f))
             btns.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
@@ -1448,6 +1510,749 @@ class MainActivity : Activity() {
             ok.setOnClickListener { d.dismiss() }
             col.addView(ok, lp(-1, dp(48)).also { it.topMargin = dp(16) })
             col
+        }
+    }
+
+    // ---------- convertidor ----------
+    private fun convKind(f: File): Int = when (f.extension.lowercase()) {
+        "jpg", "jpeg", "png", "webp", "bmp", "gif", "heic", "heif" -> 1
+        "mp3", "wav", "flac", "m4a", "aac", "ogg", "opus", "amr" -> 2
+        "pdf" -> 3
+        else -> 0
+    }
+
+    private fun convTargets(kind: Int): List<String> = when (kind) {
+        1 -> listOf("JPG", "PNG", "WebP", "PDF")
+        2 -> listOf("M4A (AAC)", "WAV")
+        else -> listOf("PNG", "JPG")
+    }
+
+    private fun convExt(kind: Int, t: Int): String = when (kind) {
+        1 -> listOf("jpg", "png", "webp", "pdf")[t]
+        2 -> listOf("m4a", "wav")[t]
+        else -> listOf("png", "jpg")[t]
+    }
+
+    private fun baseOf(f: File): String = f.name.removeSuffix(extOf(f.name))
+
+    private fun cleanName(s: String): String = s.trim().replace(Regex("[\\\\/:*?\"<>|]"), "_")
+
+    private fun openConverter(files: List<File>?) {
+        if (files != null) {
+            convFiles.clear()
+            convFiles.addAll(files.filter { convKind(it) > 0 })
+            convDest = null
+            convTarget = 0
+            convName = ""
+            selected.clear()
+        }
+        showConverter()
+    }
+
+    private fun planJobs(kind: Int): List<ConvJob> {
+        val n = convFiles.size
+        val nm = cleanName(convName)
+        val jobs = ArrayList<ConvJob>()
+        if (kind == 1 && convTarget == 3 && convMerge && n > 1) {
+            jobs.add(ConvJob(n.toString() + " imágenes en un solo PDF", ArrayList(convFiles), if (nm.isEmpty()) baseOf(convFiles[0]) + "_unido" else nm))
+        } else {
+            for ((i, f) in convFiles.withIndex()) {
+                val base = if (nm.isEmpty()) baseOf(f) else if (n == 1) nm else nm + "_" + (i + 1)
+                jobs.add(ConvJob(f.name, listOf(f), if (base.isBlank()) "archivo" else base))
+            }
+        }
+        return jobs
+    }
+
+    private fun simName(dest: File, base: String, ext: String, used: HashSet<String>): String {
+        var n = base + "." + ext
+        var i = 1
+        while (File(dest, n).exists() || used.contains(n.lowercase())) {
+            n = base + " (" + i + ")." + ext
+            i++
+        }
+        used.add(n.lowercase())
+        return n
+    }
+
+    private fun roundedThumb(): ImageView {
+        val iv = ImageView(this)
+        iv.scaleType = ImageView.ScaleType.CENTER_CROP
+        iv.outlineProvider = object : android.view.ViewOutlineProvider() {
+            override fun getOutline(v: View, o: android.graphics.Outline) {
+                o.setRoundRect(0, 0, v.width, v.height, dp(11).toFloat())
+            }
+        }
+        iv.clipToOutline = true
+        return iv
+    }
+
+    private fun convSourceRow(f: File): View {
+        val row = LinearLayout(this)
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(10), dp(8), dp(4), dp(8))
+        row.background = rounded(alpha(CARD, 0xCC), 14)
+        val item = Item(f, f.length(), f.lastModified(), catOf(f))
+        val k = badgeOf(item)
+        val lead = FrameLayout(this)
+        val badge = txt(k.first, 11f, k.second, true)
+        badge.gravity = Gravity.CENTER
+        badge.background = rounded(alpha(k.second, 0x26), 11)
+        lead.addView(badge, FrameLayout.LayoutParams(-1, -1))
+        if (convKind(f) == 1) {
+            val iv = roundedThumb()
+            lead.addView(iv, FrameLayout.LayoutParams(-1, -1))
+            bindThumb(Item(f, f.length(), f.lastModified(), 1), iv, badge)
+        }
+        row.addView(lead, lp(dp(44), dp(44)))
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        val name = txt(f.name, 14f, TXT)
+        name.isSingleLine = true
+        name.ellipsize = TextUtils.TruncateAt.END
+        col.addView(name)
+        col.addView(txt((if (f.extension.isEmpty()) "Sin extensión" else f.extension.uppercase()) + "  ·  " + fmt(f.length()), 12f, MUTE))
+        row.addView(col, lp(0, -2, 1f).also { it.leftMargin = dp(12) })
+        val rm = LinearLayout(this)
+        rm.gravity = Gravity.CENTER
+        rm.setPadding(dp(12), dp(12), dp(12), dp(12))
+        rm.addView(MenuIcon(this, 16, MUTE), lp(dp(14), dp(14)))
+        rm.setOnClickListener {
+            convFiles.remove(f)
+            showConverter()
+        }
+        row.addView(rm)
+        return row
+    }
+
+    private fun convPreviewRow(src: String, out: String): View {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.VERTICAL
+        row.setPadding(dp(12), dp(9), dp(12), dp(9))
+        row.background = rounded(alpha(Color.WHITE, 0x0E), 12)
+        val a = txt(src, 12f, MUTE)
+        a.isSingleLine = true
+        a.ellipsize = TextUtils.TruncateAt.MIDDLE
+        val b = txt("→ " + out, 14f, TXT, true)
+        b.isSingleLine = true
+        b.ellipsize = TextUtils.TruncateAt.MIDDLE
+        row.addView(a)
+        row.addView(b)
+        return row
+    }
+
+    private fun qualityBar(value: Int, labelView: TextView, onChange: (Int) -> Unit): SeekBar {
+        val sb = SeekBar(this)
+        sb.min = 10
+        sb.max = 100
+        sb.progress = value
+        sb.progressTintList = ColorStateList.valueOf(ACC)
+        sb.thumbTintList = ColorStateList.valueOf(ACC2)
+        labelView.text = "Calidad: " + value + "%"
+        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar?, p: Int, fromUser: Boolean) {
+                labelView.text = "Calidad: " + p + "%"
+                onChange(p)
+            }
+            override fun onStartTrackingTouch(bar: SeekBar?) {}
+            override fun onStopTrackingTouch(bar: SeekBar?) {}
+        })
+        return sb
+    }
+
+    private fun bgSwatches(): View {
+        val row = LinearLayout(this)
+        val opts = listOf(Pair("Blanco", Color.WHITE), Pair("Negro", Color.BLACK), Pair("Gris", c(0xFF808080)), Pair("Tema", ACC))
+        fun draw() {
+            row.removeAllViews()
+            for (o in opts) {
+                val sel = convBg == o.second
+                val tile = LinearLayout(this)
+                tile.orientation = LinearLayout.VERTICAL
+                tile.gravity = Gravity.CENTER_HORIZONTAL
+                val sw = View(this)
+                val g = GradientDrawable()
+                g.shape = GradientDrawable.OVAL
+                g.setColor(o.second)
+                g.setStroke(dp(if (sel) 3 else 1), if (sel) ACC2 else alpha(Color.WHITE, 0x44))
+                sw.background = g
+                tile.addView(sw, lp(dp(40), dp(40)))
+                tile.addView(txt(o.first, 11f, if (sel) ACC2 else TXT), lp(-2, -2).also { it.topMargin = dp(4) })
+                tile.setOnClickListener {
+                    convBg = o.second
+                    draw()
+                }
+                row.addView(tile, lp(-2, -2).also { it.rightMargin = dp(14) })
+            }
+        }
+        draw()
+        return row
+    }
+
+    private fun pickFilesSheet(onDone: (List<File>) -> Unit) {
+        showSheet { d ->
+            var cur: File = dir
+            val chosen = LinkedHashSet<File>()
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt("Agregar archivos", 18f, TXT, true))
+            val pathT = txt("", 12f, ACC2)
+            pathT.setPadding(dp(12), dp(6), dp(12), dp(6))
+            pathT.background = rounded(alpha(ACC, 0x33), 12)
+            col.addView(pathT, lp(-2, -2).also { it.topMargin = dp(10) })
+            val listBox = LinearLayout(this)
+            listBox.orientation = LinearLayout.VERTICAL
+            val sc = MaxScroll(this, (resources.displayMetrics.heightPixels * 0.42f).toInt())
+            sc.addView(listBox)
+            col.addView(sc, lp(-1, -2).also { it.topMargin = dp(8) })
+            val yes = primaryButton("Agregar")
+
+            fun render() {
+                pathT.text = "Almacenamiento interno" + cur.absolutePath.removePrefix(root.absolutePath)
+                yes.text = if (chosen.isEmpty()) "Agregar" else "Agregar (" + chosen.size + ")"
+                yes.isEnabled = chosen.isNotEmpty()
+                yes.alpha = if (chosen.isEmpty()) 0.4f else 1f
+                listBox.removeAllViews()
+                if (cur != root && cur.parentFile != null) {
+                    val up = optionRow("‹  Subir", false)
+                    up.setOnClickListener {
+                        cur = cur.parentFile ?: root
+                        render()
+                    }
+                    listBox.addView(up, lp(-1, -2).also { it.topMargin = dp(4) })
+                }
+                val all = (cur.listFiles() ?: emptyArray<File>()).sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase() }))
+                for (f in all) {
+                    if (f.isDirectory) {
+                        listBox.addView(dirRow(f.name) {
+                            cur = f
+                            render()
+                        }, lp(-1, -2).also { it.topMargin = dp(2) })
+                    } else if (convKind(f) > 0) {
+                        val sel = chosen.contains(f)
+                        val r = optionRow((if (sel) "✓  " else "") + f.name + "  ·  " + fmt(f.length()), sel)
+                        r.isSingleLine = true
+                        r.ellipsize = TextUtils.TruncateAt.END
+                        r.setOnClickListener {
+                            if (!chosen.add(f)) chosen.remove(f)
+                            render()
+                        }
+                        listBox.addView(r, lp(-1, -2).also { it.topMargin = dp(2) })
+                    }
+                }
+            }
+
+            val btns = LinearLayout(this)
+            val no = ghostButton("Cancelar")
+            no.setOnClickListener { d.dismiss() }
+            yes.setOnClickListener {
+                d.dismiss()
+                onDone(chosen.toList())
+            }
+            btns.addView(no, lp(0, dp(48), 1f))
+            btns.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+            col.addView(btns, lp(-1, -2).also { it.topMargin = dp(14) })
+            render()
+            col
+        }
+    }
+
+    private fun showConverter() {
+        val y = pageScroll?.scrollY ?: 0
+        val b = body()
+        val kinds = convFiles.map { convKind(it) }.distinct()
+        val mixed = kinds.size > 1
+        val kind = if (kinds.size == 1) kinds[0] else 0
+        val targets = convTargets(kind)
+        if (convTarget >= targets.size) convTarget = 0
+        val destDir = convDest ?: convFiles.firstOrNull()?.parentFile ?: dir
+        val amber = c(0xFFFBBF24)
+
+        b.addView(sectionTitle("Archivos de origen"))
+        if (convFiles.isEmpty()) b.addView(txt("Aún no hay archivos. Agrega imágenes, audios o PDF.", 13f, MUTE))
+        for (f in convFiles) b.addView(convSourceRow(f), lp(-1, -2).also { it.topMargin = dp(6) })
+        val add = ghostButton("Agregar archivos")
+        add.setOnClickListener {
+            pickFilesSheet { picked ->
+                for (pf in picked) if (!convFiles.contains(pf)) convFiles.add(pf)
+                showConverter()
+            }
+        }
+        b.addView(add, lp(-1, dp(46)).also { it.topMargin = dp(10) })
+        if (mixed) b.addView(txt("Los archivos deben ser del mismo tipo (imágenes, audio o PDF). Quita los que no coincidan.", 13f, amber, true), lp(-1, -2).also { it.topMargin = dp(8) })
+        b.addView(txt("Disponible: imágenes (JPG, PNG, WebP, PDF), audio (M4A, WAV) y PDF a imágenes. Los videos y otros documentos todavía no se pueden convertir.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+
+        val previewBox = LinearLayout(this)
+        previewBox.orientation = LinearLayout.VERTICAL
+        fun fillPreview() {
+            previewBox.removeAllViews()
+            if (kind == 0 || convFiles.isEmpty() || mixed) return
+            val jobs = planJobs(kind)
+            val ext = convExt(kind, convTarget)
+            val used = HashSet<String>()
+            for (j in jobs.take(8)) {
+                val out = if (kind == 3) j.outBase + "_p001." + ext + "  (una imagen por página)" else simName(destDir, j.outBase, ext, used)
+                previewBox.addView(convPreviewRow(j.label, out), lp(-1, -2).also { it.topMargin = dp(8) })
+            }
+            if (jobs.size > 8) previewBox.addView(txt("… y " + (jobs.size - 8) + " más", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(8) })
+        }
+
+        if (kind > 0) {
+            b.addView(sectionTitle("Convertir a"))
+            b.addView(chipGroup(targets, convTarget) {
+                convTarget = it
+                showConverter()
+            })
+            if (kind == 2) b.addView(txt("Android no incluye un codificador de MP3, por eso el audio se convierte a M4A (AAC) o WAV.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+
+            val opt = LinearLayout(this)
+            opt.orientation = LinearLayout.VERTICAL
+            if (kind == 1 && (convTarget == 0 || convTarget == 2)) {
+                val ql = txt("", 13f, TXT, true)
+                opt.addView(label("Calidad"))
+                opt.addView(ql, lp(-2, -2).also { it.topMargin = dp(6) })
+                opt.addView(qualityBar(convQuality, ql) { convQuality = it }, lp(-1, -2))
+            }
+            if (kind == 1 && convTarget == 0 && convFiles.any { it.extension.lowercase() != "jpg" && it.extension.lowercase() != "jpeg" }) {
+                opt.addView(label("Fondo para las zonas transparentes"))
+                opt.addView(bgSwatches(), lp(-2, -2).also { it.topMargin = dp(8) })
+                opt.addView(txt("El JPG no admite transparencia: esas zonas se rellenan con este color.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+            }
+            if (kind == 1 && convTarget == 3) {
+                if (convFiles.size > 1) {
+                    opt.addView(label("Resultado"))
+                    opt.addView(chipGroup(listOf("Un solo PDF", "Un PDF por imagen"), if (convMerge) 0 else 1) {
+                        convMerge = it == 0
+                        showConverter()
+                    }, lp(-1, -2).also { it.topMargin = dp(6) })
+                }
+                opt.addView(label("Calidad del PDF"))
+                opt.addView(chipGroup(listOf("Alta", "Media", "Baja"), convPdfDimIdx) { convPdfDimIdx = it }, lp(-1, -2).also { it.topMargin = dp(6) })
+                opt.addView(txt("Alta: 2400 px, Media: 1600 px, Baja: 1000 px del lado mayor. Más calidad genera un PDF más pesado.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+            }
+            if (kind == 2 && convTarget == 0) {
+                opt.addView(label("Bitrate"))
+                opt.addView(chipGroup(listOf("96 kbps", "128 kbps", "192 kbps", "256 kbps"), convBitrateIdx) { convBitrateIdx = it }, lp(-1, -2).also { it.topMargin = dp(6) })
+            }
+            if (kind == 2 && convTarget == 1) {
+                opt.addView(txt("WAV sin pérdida: conserva la frecuencia original (PCM de 16 bits). El archivo resultante pesa mucho más.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
+            }
+            if (kind == 3) {
+                opt.addView(label("Resolución de las imágenes"))
+                opt.addView(chipGroup(listOf("Baja (100 dpi)", "Normal (150 dpi)", "Alta (200 dpi)"), convDpiIdx) { convDpiIdx = it }, lp(-1, -2).also { it.topMargin = dp(6) })
+                if (convTarget == 1) {
+                    val ql = txt("", 13f, TXT, true)
+                    opt.addView(label("Calidad"))
+                    opt.addView(ql, lp(-2, -2).also { it.topMargin = dp(6) })
+                    opt.addView(qualityBar(convQuality, ql) { convQuality = it }, lp(-1, -2))
+                }
+            }
+            if (opt.childCount > 0) {
+                b.addView(sectionTitle("Opciones"))
+                b.addView(opt)
+            }
+        }
+
+        b.addView(sectionTitle("Guardar en"))
+        val pathT = txt("Almacenamiento interno" + destDir.absolutePath.removePrefix(root.absolutePath), 12f, ACC2)
+        pathT.setPadding(dp(12), dp(6), dp(12), dp(6))
+        pathT.background = rounded(alpha(ACC, 0x33), 12)
+        b.addView(pathT, lp(-2, -2))
+        val chg = ghostButton("Cambiar carpeta")
+        chg.setOnClickListener {
+            pickFolder("Guardar en…", "Elegir esta carpeta", destDir) { picked ->
+                convDest = picked
+                showConverter()
+                true
+            }
+        }
+        b.addView(chg, lp(-1, dp(46)).also { it.topMargin = dp(8) })
+        b.addView(label("Nombre del resultado (opcional)"))
+        b.addView(field("Igual que el original", false, convName) {
+            convName = it
+            fillPreview()
+        }, lp(-1, -2).also { it.topMargin = dp(6) })
+        b.addView(txt("Vacío: cada archivo conserva su nombre. Si ya existe uno igual, se agrega (1): nunca se sobrescribe nada.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(6) })
+
+        if (kind > 0) {
+            b.addView(sectionTitle("Vista previa"))
+            if (kind == 1) {
+                val pv = roundedThumb()
+                b.addView(pv, lp(dp(120), dp(120)))
+                val f0 = convFiles[0]
+                Thread {
+                    val bm = try {
+                        decodeFull(f0, 360)
+                    } catch (e: Throwable) {
+                        null
+                    }
+                    if (bm != null) runOnUiThread { pv.setImageBitmap(bm) }
+                }.start()
+            }
+            b.addView(previewBox)
+            fillPreview()
+        }
+
+        val canWrite = destDir.isDirectory && destDir.canWrite()
+        val canGo = convFiles.isNotEmpty() && !mixed && kind > 0 && canWrite
+        val go = primaryButton("Convertir" + (if (convFiles.size > 1) " (" + convFiles.size + ")" else ""))
+        go.isEnabled = canGo
+        go.alpha = if (canGo) 1f else 0.4f
+        go.setOnClickListener { startConversion(destDir) }
+        b.addView(go, lp(-1, dp(52)).also { it.topMargin = dp(20) })
+        if (!canWrite) b.addView(txt("Nexora no puede escribir en esta carpeta. Elige otra para guardar.", 12f, amber, true), lp(-1, -2).also { it.topMargin = dp(8) })
+
+        page("Convertidor", b)
+        pageScroll?.post { pageScroll?.scrollTo(0, y) }
+    }
+
+    private fun friendlyError(e: Throwable): String =
+        if (e is OutOfMemoryError) "memoria insuficiente en el dispositivo" else (e.message ?: e.javaClass.simpleName)
+
+    private fun updateJobRow(j: ConvJob) {
+        val st = j.statusView ?: return
+        when (j.status) {
+            0 -> {
+                st.text = "En espera"
+                st.setTextColor(MUTE)
+            }
+            1 -> {
+                st.text = "Convirtiendo…"
+                st.setTextColor(ACC2)
+            }
+            2 -> {
+                st.text = "Listo"
+                st.setTextColor(GREEN)
+            }
+            3 -> {
+                st.text = "Error: " + j.msg
+                st.setTextColor(c(0xFFFB7185))
+            }
+            else -> {
+                st.text = "Cancelado"
+                st.setTextColor(MUTE)
+            }
+        }
+    }
+
+    private fun showConvertProgress(jobs: List<ConvJob>) {
+        val b = body()
+        val head = txt("Convirtiendo 0 de " + jobs.size, 17f, TXT, true)
+        convHead = head
+        b.addView(head)
+        val overall = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+        overall.max = 1000
+        overall.progressTintList = ColorStateList.valueOf(ACC)
+        convOverall = overall
+        b.addView(overall, lp(-1, dp(8)).also { it.topMargin = dp(10); it.bottomMargin = dp(14) })
+        for (j in jobs) {
+            val card = cardBox()
+            val nm = txt(j.label, 14f, TXT, true)
+            nm.isSingleLine = true
+            nm.ellipsize = TextUtils.TruncateAt.MIDDLE
+            val st = txt("En espera", 12f, MUTE)
+            val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+            pb.max = 1000
+            pb.progressTintList = ColorStateList.valueOf(ACC2)
+            j.statusView = st
+            j.bar = pb
+            card.addView(nm)
+            card.addView(st, lp(-1, -2).also { it.topMargin = dp(2) })
+            card.addView(pb, lp(-1, dp(5)).also { it.topMargin = dp(8) })
+            b.addView(card, lp(-1, -2).also { it.bottomMargin = dp(8) })
+        }
+        val cancel = ghostButton("Cancelar conversión")
+        cancel.setOnClickListener {
+            convCancel = true
+            cancel.text = "Cancelando…"
+            cancel.isEnabled = false
+        }
+        b.addView(cancel, lp(-1, dp(48)).also { it.topMargin = dp(10) })
+        page("Convertidor", b)
+    }
+
+    private fun startConversion(destDir: File) {
+        val kind = convKind(convFiles[0])
+        convDest = destDir
+        val jobs = planJobs(kind)
+        converting = true
+        convCancel = false
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        showConvertProgress(jobs)
+        Thread {
+            val total = jobs.size
+            for ((i, j) in jobs.withIndex()) {
+                if (convCancel) {
+                    j.status = 4
+                    runOnUiThread { updateJobRow(j) }
+                    continue
+                }
+                j.status = 1
+                runOnUiThread {
+                    convHead?.text = "Convirtiendo " + (i + 1) + " de " + total
+                    updateJobRow(j)
+                }
+                var last = -1
+                val prog: (Float) -> Unit = { p ->
+                    val q = (p * 100).toInt()
+                    if (q != last) {
+                        last = q
+                        runOnUiThread {
+                            j.bar?.progress = (p * 1000).toInt()
+                            convOverall?.progress = ((i + p) / total * 1000).toInt()
+                        }
+                    }
+                }
+                try {
+                    execJob(kind, j, destDir, prog)
+                    j.status = 2
+                } catch (e: Throwable) {
+                    if (convCancel) {
+                        j.status = 4
+                    } else {
+                        j.status = 3
+                        j.msg = friendlyError(e)
+                    }
+                }
+                runOnUiThread {
+                    updateJobRow(j)
+                    j.bar?.progress = 1000
+                    convOverall?.progress = (i + 1) * 1000 / total
+                }
+            }
+            runOnUiThread {
+                converting = false
+                window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                showConvertResult(jobs, destDir)
+            }
+        }.start()
+    }
+
+    private fun showConvertResult(jobs: List<ConvJob>, destDir: File) {
+        val ok = jobs.count { it.status == 2 }
+        val bad = jobs.count { it.status == 3 }
+        val cancelled = jobs.count { it.status == 4 }
+        val b = body()
+        b.addView(txt(if (bad == 0 && cancelled == 0) "Conversión completada" else if (ok == 0) "No se pudo convertir" else "Terminó con avisos", 20f, TXT, true))
+        val parts = ArrayList<String>()
+        if (ok > 0) parts.add("✓ " + ok + " correctos")
+        if (bad > 0) parts.add("✕ " + bad + " con error")
+        if (cancelled > 0) parts.add(cancelled.toString() + " cancelados")
+        b.addView(txt(parts.joinToString("   ·   "), 13f, MUTE, true), lp(-1, -2).also { it.topMargin = dp(6); it.bottomMargin = dp(12) })
+        val previewable = setOf("jpg", "jpeg", "png", "webp", "pdf")
+        for (j in jobs) {
+            val card = cardBox()
+            val nm = txt(j.label, 14f, TXT, true)
+            nm.isSingleLine = true
+            nm.ellipsize = TextUtils.TruncateAt.MIDDLE
+            card.addView(nm)
+            val st = txt("", 12f, MUTE)
+            card.addView(st, lp(-1, -2).also { it.topMargin = dp(2) })
+            j.statusView = st
+            updateJobRow(j)
+            for (o in j.outs.take(6)) {
+                val t = txt("→ " + o.name, 13f, if (o.extension.lowercase() in previewable) ACC2 else TXT)
+                t.isSingleLine = true
+                t.ellipsize = TextUtils.TruncateAt.MIDDLE
+                if (o.extension.lowercase() in previewable) t.setOnClickListener { tap(o) }
+                card.addView(t, lp(-1, -2).also { it.topMargin = dp(6) })
+            }
+            if (j.outs.size > 6) card.addView(txt("… y " + (j.outs.size - 6) + " más", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(4) })
+            b.addView(card, lp(-1, -2).also { it.bottomMargin = dp(8) })
+        }
+        val see = primaryButton("Ver en la carpeta")
+        see.setOnClickListener {
+            dir = destDir
+            selected.clear()
+            closeViewer()
+        }
+        b.addView(see, lp(-1, dp(50)).also { it.topMargin = dp(10) })
+        val more = ghostButton("Convertir más")
+        more.setOnClickListener {
+            convFiles.clear()
+            convName = ""
+            showConverter()
+        }
+        b.addView(more, lp(-1, dp(48)).also { it.topMargin = dp(8) })
+        page("Convertidor", b)
+    }
+
+    private fun uniqueFile(d: File, base: String, ext: String): File {
+        var f = File(d, base + "." + ext)
+        var i = 1
+        while (f.exists()) {
+            f = File(d, base + " (" + i + ")." + ext)
+            i++
+        }
+        return f
+    }
+
+    private fun finalizeFile(tmp: File, dest: File, base: String, ext: String): File {
+        var target = uniqueFile(dest, base, ext)
+        for (attempt in 0..5) {
+            try {
+                java.nio.file.Files.move(tmp.toPath(), target.toPath())
+                return target
+            } catch (e: java.nio.file.FileAlreadyExistsException) {
+                target = uniqueFile(dest, base, ext)
+            }
+        }
+        throw Exception("no se pudo guardar sin sobrescribir otro archivo")
+    }
+
+    private fun decodeFull(f: File, maxDim: Int): Bitmap {
+        val o = BitmapFactory.Options()
+        o.inJustDecodeBounds = true
+        BitmapFactory.decodeFile(f.path, o)
+        if (o.outWidth <= 0 || o.outHeight <= 0) throw Exception("no se pudo leer la imagen (formato no compatible o archivo dañado)")
+        var s = 1
+        if (maxDim > 0) while (maxOf(o.outWidth, o.outHeight) / (s * 2) >= maxDim) s *= 2
+        var res: Bitmap? = null
+        while (res == null) {
+            try {
+                val o2 = BitmapFactory.Options()
+                o2.inSampleSize = s
+                res = BitmapFactory.decodeFile(f.path, o2) ?: throw Exception("no se pudo decodificar la imagen")
+            } catch (e: OutOfMemoryError) {
+                s *= 2
+                if (s > 64) throw Exception("la imagen es demasiado grande para la memoria disponible")
+            }
+        }
+        var b: Bitmap = res!!
+        if (maxDim > 0 && maxOf(b.width, b.height) > maxDim) {
+            val k = maxDim.toFloat() / maxOf(b.width, b.height)
+            b = Bitmap.createScaledBitmap(b, maxOf(1, (b.width * k).toInt()), maxOf(1, (b.height * k).toInt()), true)
+        }
+        var rot = 0
+        try {
+            val ori = ExifInterface(f.path).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1)
+            rot = if (ori == 6) 90 else if (ori == 3) 180 else if (ori == 8) 270 else 0
+        } catch (e: Exception) {
+            rot = 0
+        }
+        if (rot != 0) {
+            val m = Matrix()
+            m.postRotate(rot.toFloat())
+            b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, m, true)
+        }
+        return b
+    }
+
+    @Suppress("DEPRECATION")
+    private fun webpFormat(): Bitmap.CompressFormat =
+        if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
+
+    private fun convertImage(f: File, fmtIdx: Int, quality: Int, bg: Int, out: File) {
+        val bm = decodeFull(f, 0)
+        var src = bm
+        if (fmtIdx == 0 && bm.hasAlpha()) {
+            val flat = Bitmap.createBitmap(bm.width, bm.height, Bitmap.Config.ARGB_8888)
+            val cv = Canvas(flat)
+            cv.drawColor(bg)
+            cv.drawBitmap(bm, 0f, 0f, null)
+            src = flat
+        }
+        val cf = if (fmtIdx == 0) Bitmap.CompressFormat.JPEG else if (fmtIdx == 1) Bitmap.CompressFormat.PNG else webpFormat()
+        FileOutputStream(out).use { os ->
+            if (!src.compress(cf, quality, os)) throw Exception("el sistema no pudo codificar la imagen")
+        }
+    }
+
+    private fun imagesToPdf(srcs: List<File>, out: File, maxDim: Int, onProg: (Float) -> Unit) {
+        val doc = PdfDocument()
+        try {
+            for ((i, f) in srcs.withIndex()) {
+                if (convCancel) throw Exception("cancelado")
+                val bm = try {
+                    decodeFull(f, maxDim)
+                } catch (e: Exception) {
+                    throw Exception(f.name + ": " + e.message)
+                }
+                val pw = if (bm.width > bm.height) 842 else 595
+                val ph = maxOf(1, (pw.toFloat() * bm.height / bm.width).toInt())
+                val page = doc.startPage(PdfDocument.PageInfo.Builder(pw, ph, i + 1).create())
+                val cv = page.canvas
+                cv.drawColor(Color.WHITE)
+                cv.drawBitmap(bm, null, android.graphics.Rect(0, 0, pw, ph), Paint(Paint.FILTER_BITMAP_FLAG))
+                doc.finishPage(page)
+                onProg((i + 1f) / srcs.size)
+            }
+            FileOutputStream(out).use { os -> doc.writeTo(os) }
+        } finally {
+            doc.close()
+        }
+    }
+
+    private fun pdfToImages(f: File, dest: File, base: String, fmtIdx: Int, dpi: Int, quality: Int, outs: MutableList<File>, onProg: (Float) -> Unit) {
+        val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+        try {
+            val rr = PdfRenderer(pfd)
+            try {
+                val n = rr.pageCount
+                for (i in 0 until n) {
+                    if (convCancel) throw Exception("cancelado")
+                    val pg = rr.openPage(i)
+                    val sc = dpi / 72f
+                    var w = maxOf(1, (pg.width * sc).toInt())
+                    var h = maxOf(1, (pg.height * sc).toInt())
+                    val big = maxOf(w, h)
+                    if (big > 4000) {
+                        val k = 4000f / big
+                        w = maxOf(1, (w * k).toInt())
+                        h = maxOf(1, (h * k).toInt())
+                    }
+                    val bm = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    bm.eraseColor(Color.WHITE)
+                    pg.render(bm, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                    pg.close()
+                    val tmp = File(dest, ".nexora_" + System.nanoTime() + ".tmp")
+                    try {
+                        FileOutputStream(tmp).use { os ->
+                            if (!bm.compress(if (fmtIdx == 0) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, quality, os)) throw Exception("el sistema no pudo codificar la página " + (i + 1))
+                        }
+                        outs.add(finalizeFile(tmp, dest, base + "_p" + (i + 1).toString().padStart(3, '0'), if (fmtIdx == 0) "png" else "jpg"))
+                    } finally {
+                        if (tmp.exists()) tmp.delete()
+                        bm.recycle()
+                    }
+                    onProg((i + 1f) / n)
+                }
+            } finally {
+                rr.close()
+            }
+        } catch (e: SecurityException) {
+            throw Exception("el PDF está protegido con contraseña")
+        } finally {
+            pfd.close()
+        }
+    }
+
+    private fun execJob(kind: Int, j: ConvJob, dest: File, onProg: (Float) -> Unit) {
+        if (!dest.canWrite()) throw Exception("sin permiso de escritura en la carpeta de destino")
+        val ext = convExt(kind, convTarget)
+        val tmp = File(dest, ".nexora_" + System.nanoTime() + ".tmp")
+        try {
+            if (kind == 1) {
+                if (convTarget == 3) {
+                    imagesToPdf(j.srcs, tmp, intArrayOf(2400, 1600, 1000)[convPdfDimIdx], onProg)
+                    j.outs.add(finalizeFile(tmp, dest, j.outBase, "pdf"))
+                } else {
+                    val f = j.srcs[0]
+                    if (convTarget == 1 && f.extension.lowercase() == "png") throw Exception("ya está en PNG")
+                    convertImage(f, convTarget, convQuality, convBg, tmp)
+                    onProg(1f)
+                    j.outs.add(finalizeFile(tmp, dest, j.outBase, ext))
+                }
+            } else if (kind == 2) {
+                val f = j.srcs[0]
+                if (f.extension.lowercase() == ext) throw Exception("ya está en ese formato")
+                AudioConverter(f, tmp, convTarget == 0, intArrayOf(96, 128, 192, 256)[convBitrateIdx], { convCancel }, onProg).run()
+                j.outs.add(finalizeFile(tmp, dest, j.outBase, ext))
+            } else {
+                pdfToImages(j.srcs[0], dest, j.outBase, convTarget, intArrayOf(100, 150, 200)[convDpiIdx], convQuality, j.outs, onProg)
+            }
+        } finally {
+            if (tmp.exists()) tmp.delete()
         }
     }
 
@@ -2022,6 +2827,10 @@ class MainActivity : Activity() {
     }
 
     private fun closeViewer() {
+        if (converting) {
+            toast("Hay una conversión en curso. Usa Cancelar para detenerla.")
+            return
+        }
         token++
         showBrowser()
     }
@@ -2319,6 +3128,297 @@ private class MenuIcon(ctx: Context, val kind: Int, val col: Int) : View(ctx) {
                 cv.drawLine(w * 0.22f, h * 0.22f, w * 0.78f, h * 0.78f, p)
                 cv.drawLine(w * 0.78f, h * 0.22f, w * 0.22f, h * 0.78f, p)
             }
+            17 -> {
+                cv.drawLine(w * 0.14f, h * 0.32f, w * 0.86f, h * 0.32f, p)
+                path.moveTo(w * 0.68f, h * 0.16f)
+                path.lineTo(w * 0.86f, h * 0.32f)
+                path.lineTo(w * 0.68f, h * 0.48f)
+                cv.drawPath(path, p)
+                cv.drawLine(w * 0.14f, h * 0.68f, w * 0.86f, h * 0.68f, p)
+                val back = Path()
+                back.moveTo(w * 0.32f, h * 0.52f)
+                back.lineTo(w * 0.14f, h * 0.68f)
+                back.lineTo(w * 0.32f, h * 0.84f)
+                cv.drawPath(back, p)
+            }
         }
+    }
+}
+
+
+private class ConvJob(val label: String, val srcs: List<File>, val outBase: String) {
+    var status = 0
+    var msg = ""
+    val outs = ArrayList<File>()
+    var statusView: TextView? = null
+    var bar: ProgressBar? = null
+}
+
+private fun wavHeader(rate: Int, ch: Int, dataLen: Long): ByteArray {
+    val bb = ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    bb.put("RIFF".toByteArray())
+    bb.putInt((36 + dataLen).toInt())
+    bb.put("WAVE".toByteArray())
+    bb.put("fmt ".toByteArray())
+    bb.putInt(16)
+    bb.putShort(1)
+    bb.putShort(ch.toShort())
+    bb.putInt(rate)
+    bb.putInt(rate * ch * 2)
+    bb.putShort((ch * 2).toShort())
+    bb.putShort(16)
+    bb.put("data".toByteArray())
+    bb.putInt(dataLen.toInt())
+    return bb.array()
+}
+
+private class AudioConverter(
+    val src: File,
+    val dst: File,
+    val toM4a: Boolean,
+    val bitrateK: Int,
+    val cancelled: () -> Boolean,
+    val onProg: (Float) -> Unit
+) {
+    private var ex: MediaExtractor? = null
+    private var dec: MediaCodec? = null
+    private var enc: MediaCodec? = null
+    private var mux: MediaMuxer? = null
+    private var raf: RandomAccessFile? = null
+    private var muxTrack = -1
+    private var muxStarted = false
+    private var rate = 44100
+    private var ch = 2
+    private var sinkReady = false
+    private var wavBytes = 0L
+    private var samples = 0L
+    private val ebi = MediaCodec.BufferInfo()
+
+    fun run() {
+        val e = MediaExtractor()
+        ex = e
+        try {
+            e.setDataSource(src.path)
+            var found: MediaFormat? = null
+            var track = -1
+            for (i in 0 until e.trackCount) {
+                val f = e.getTrackFormat(i)
+                if ((f.getString(MediaFormat.KEY_MIME) ?: "").startsWith("audio/")) {
+                    found = f
+                    track = i
+                    break
+                }
+            }
+            val inFmt: MediaFormat = found ?: throw Exception("el archivo no contiene audio que se pueda leer")
+            e.selectTrack(track)
+            val mime = inFmt.getString(MediaFormat.KEY_MIME) ?: ""
+            rate = inFmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            ch = inFmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            if (ch < 1 || ch > 2) throw Exception("solo se admite audio mono o estéreo")
+            val durUs = if (inFmt.containsKey(MediaFormat.KEY_DURATION)) inFmt.getLong(MediaFormat.KEY_DURATION) else 0L
+            if (mime == "audio/raw") {
+                if (inFmt.containsKey(MediaFormat.KEY_PCM_ENCODING) && inFmt.getInteger(MediaFormat.KEY_PCM_ENCODING) != 2) {
+                    throw Exception("este WAV no es de 16 bits y no se puede convertir")
+                }
+                val bb = ByteBuffer.allocate(1 shl 16)
+                while (true) {
+                    if (cancelled()) throw Exception("cancelado")
+                    bb.clear()
+                    val n = e.readSampleData(bb, 0)
+                    if (n < 0) break
+                    val arr = ByteArray(n)
+                    bb.position(0)
+                    bb.limit(n)
+                    bb.get(arr, 0, n)
+                    writePcm(arr, n)
+                    progress(e, durUs)
+                    e.advance()
+                }
+            } else {
+                val d = try {
+                    MediaCodec.createDecoderByType(mime)
+                } catch (x: Exception) {
+                    throw Exception("este dispositivo no puede leer audio " + mime)
+                }
+                dec = d
+                d.configure(inFmt, null, null, 0)
+                d.start()
+                val info = MediaCodec.BufferInfo()
+                var inDone = false
+                var outDone = false
+                while (!outDone) {
+                    if (cancelled()) throw Exception("cancelado")
+                    if (!inDone) {
+                        val ii = d.dequeueInputBuffer(10000L)
+                        if (ii >= 0) {
+                            val ib = d.getInputBuffer(ii)!!
+                            val n = e.readSampleData(ib, 0)
+                            if (n < 0) {
+                                d.queueInputBuffer(ii, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                inDone = true
+                            } else {
+                                d.queueInputBuffer(ii, 0, n, e.sampleTime, 0)
+                                progress(e, durUs)
+                                e.advance()
+                            }
+                        }
+                    }
+                    val oi = d.dequeueOutputBuffer(info, 10000L)
+                    if (oi >= 0) {
+                        if (info.size > 0) {
+                            val ob = d.getOutputBuffer(oi)!!
+                            val arr = ByteArray(info.size)
+                            ob.position(info.offset)
+                            ob.limit(info.offset + info.size)
+                            ob.get(arr)
+                            writePcm(arr, arr.size)
+                        }
+                        d.releaseOutputBuffer(oi, false)
+                        if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outDone = true
+                    } else if (oi == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        val nf = d.outputFormat
+                        if (nf.containsKey(MediaFormat.KEY_PCM_ENCODING) && nf.getInteger(MediaFormat.KEY_PCM_ENCODING) != 2) {
+                            throw Exception("este audio usa una profundidad que no se puede convertir")
+                        }
+                        if (!sinkReady) {
+                            rate = nf.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                            ch = nf.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                            if (ch < 1 || ch > 2) throw Exception("solo se admite audio mono o estéreo")
+                        }
+                    }
+                }
+            }
+            finishSink()
+        } finally {
+            release()
+        }
+    }
+
+    private fun progress(e: MediaExtractor, durUs: Long) {
+        val t = e.sampleTime
+        if (t >= 0 && durUs > 0) onProg((t.toFloat() / durUs).coerceIn(0f, 1f))
+    }
+
+    private fun writePcm(b: ByteArray, len: Int) {
+        if (!sinkReady) initSink()
+        if (!toM4a) {
+            raf!!.write(b, 0, len)
+            wavBytes += len
+            if (wavBytes > 2000000000L) throw Exception("el WAV resultante superaría los 2 GB")
+        } else {
+            encodePcm(b, len)
+        }
+    }
+
+    private fun initSink() {
+        sinkReady = true
+        if (!toM4a) {
+            val r = RandomAccessFile(dst, "rw")
+            r.setLength(0)
+            r.write(ByteArray(44))
+            raf = r
+        } else {
+            val ef = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, rate, ch)
+            ef.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+            ef.setInteger(MediaFormat.KEY_BIT_RATE, bitrateK * 1000)
+            ef.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 65536)
+            val en = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            enc = en
+            en.configure(ef, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            en.start()
+            mux = MediaMuxer(dst.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        }
+    }
+
+    private fun encodePcm(b: ByteArray, len: Int) {
+        val en = enc!!
+        val frame = 2 * ch
+        var off = 0
+        while (off < len) {
+            if (cancelled()) throw Exception("cancelado")
+            val ii = en.dequeueInputBuffer(10000L)
+            if (ii < 0) {
+                drainEnc(false)
+                continue
+            }
+            val buf = en.getInputBuffer(ii)!!
+            buf.clear()
+            var n = minOf(buf.capacity(), len - off)
+            n -= n % frame
+            if (n <= 0) throw Exception("el codificador de este dispositivo no acepta este audio")
+            buf.put(b, off, n)
+            en.queueInputBuffer(ii, 0, n, samples * 1000000L / rate, 0)
+            samples += (n / frame).toLong()
+            off += n
+            drainEnc(false)
+        }
+    }
+
+    private fun drainEnc(wait: Boolean) {
+        val en = enc ?: return
+        var idle = 0
+        while (true) {
+            val oi = en.dequeueOutputBuffer(ebi, if (wait) 10000L else 0L)
+            if (oi == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (!wait) return
+                idle++
+                if (idle > 500) throw Exception("el codificador no responde")
+            } else if (oi == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                muxTrack = mux!!.addTrack(en.outputFormat)
+                mux!!.start()
+                muxStarted = true
+            } else if (oi >= 0) {
+                idle = 0
+                val ob = en.getOutputBuffer(oi)!!
+                if ((ebi.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) ebi.size = 0
+                if (ebi.size > 0 && muxStarted) {
+                    ob.position(ebi.offset)
+                    ob.limit(ebi.offset + ebi.size)
+                    mux!!.writeSampleData(muxTrack, ob, ebi)
+                }
+                en.releaseOutputBuffer(oi, false)
+                if ((ebi.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) return
+            }
+        }
+    }
+
+    private fun finishSink() {
+        if (!sinkReady) throw Exception("no se obtuvo audio del archivo")
+        if (!toM4a) {
+            val r = raf!!
+            r.seek(0)
+            r.write(wavHeader(rate, ch, wavBytes))
+        } else {
+            val en = enc!!
+            var done = false
+            var tries = 0
+            while (!done) {
+                val ii = en.dequeueInputBuffer(10000L)
+                if (ii >= 0) {
+                    en.queueInputBuffer(ii, 0, 0, samples * 1000000L / rate, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                    done = true
+                } else {
+                    drainEnc(false)
+                    tries++
+                    if (tries > 1000) throw Exception("el codificador no responde")
+                }
+            }
+            drainEnc(true)
+            if (muxStarted) {
+                mux!!.stop()
+                muxStarted = false
+            }
+        }
+    }
+
+    private fun release() {
+        try { dec?.stop() } catch (x: Exception) {}
+        try { dec?.release() } catch (x: Exception) {}
+        try { enc?.stop() } catch (x: Exception) {}
+        try { enc?.release() } catch (x: Exception) {}
+        try { if (muxStarted) mux?.stop() } catch (x: Exception) {}
+        try { mux?.release() } catch (x: Exception) {}
+        try { raf?.close() } catch (x: Exception) {}
+        try { ex?.release() } catch (x: Exception) {}
     }
 }
