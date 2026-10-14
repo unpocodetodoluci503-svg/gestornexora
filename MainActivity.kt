@@ -3,9 +3,14 @@ package com.gestor.archivos
 import android.Manifest
 import android.app.Activity
 import android.app.Dialog
+import android.content.ClipData
+import android.content.ContentProvider
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.Cursor
+import android.database.MatrixCursor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -25,6 +30,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
@@ -35,6 +41,7 @@ import android.view.WindowManager
 import android.webkit.MimeTypeMap
 import android.widget.*
 import java.io.File
+import java.io.FileNotFoundException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -115,13 +122,34 @@ class MainActivity : Activity() {
                     "Vista previa en vivo con el nombre original, el nuevo y el estado de cada archivo",
                     "Numeración configurable: separador, número inicial, ceros iniciales y orden (selección, nombre, fecha o tamaño)",
                     "Nunca sobrescribe: avisa de los conflictos antes de renombrar",
-                    "Resumen final con opción de deshacer todo el renombrado"))))
+                    "Resumen final con opción de deshacer todo el renombrado")))),
+        Entrada("0.3.2", null, "Acciones completas y miniaturas",
+            "Gestiona tus archivos sin salir de Nexora y reconoce tus fotos de un vistazo.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Miniaturas reales de las imágenes en la lista, con caché para que carguen rápido",
+                    "Copiar archivos a otra carpeta",
+                    "Mover archivos a otra carpeta",
+                    "Compartir archivos con las opciones de Android",
+                    "Información del archivo: nombre, formato, tamaño, ubicación y fecha",
+                    "Eliminar uno o varios archivos, con confirmación y resumen de resultados",
+                    "Seleccionar todos los archivos de la lista")),
+                Seccion("Mejoras", listOf(
+                    "Barra de acciones compacta que se desliza y muestra solo lo disponible en cada caso",
+                    "Renombrar para un archivo y Renombre múltiple para dos o más, siempre por separado",
+                    "Renombre múltiple: ejemplo con «Foto» y nuevo orden «Lista» (el mismo del explorador)",
+                    "Cada operación informa qué archivos se procesaron y cuáles fallaron",
+                    "Extraer ZIP desde la barra de acciones")),
+                Seccion("Correcciones", listOf(
+                    "Con un solo archivo seleccionado, Renombrar ya aparece directamente en la barra"))))
     )
 
     private val pendientes = listOf(
         "Perfil: en desarrollo, todavía sin funciones.",
         "Ordenar por fecha de creación: Android no entrega ese dato de forma fiable.",
         "Renombre múltiple de carpetas: se evaluará como mejora futura.",
+        "Copiar, mover y compartir carpetas: por ahora solo funcionan con archivos.",
+        "Miniaturas de videos: por ahora solo se muestran las de imágenes.",
         "Vista en cuadrícula: aún no existe.",
         "Extraer RAR y 7z: por ahora solo se extraen ZIP."
     )
@@ -169,6 +197,17 @@ class MainActivity : Activity() {
     private var bgBitmap: Bitmap? = null
     private val selected = LinkedHashSet<File>()
     private lateinit var selBar: LinearLayout
+    private lateinit var selWrap: HorizontalScrollView
+    private val dateFull = SimpleDateFormat("d MMM yyyy, HH:mm", Locale("es"))
+    private val thumbPx: Int get() = dp(52)
+    private val memCache = object : android.util.LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 10).toInt()) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+    private val failedThumbs: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val thumbPool = java.util.concurrent.ThreadPoolExecutor(3, 3, 30L, java.util.concurrent.TimeUnit.SECONDS, LifoQueue())
+    init {
+        thumbPool.allowCoreThreadTimeOut(true)
+    }
 
     private val prefs by lazy { getSharedPreferences("nexora", MODE_PRIVATE) }
     private val dateFmt = SimpleDateFormat("d MMM yyyy", Locale("es"))
@@ -189,6 +228,7 @@ class MainActivity : Activity() {
         loadTheme()
         root = Environment.getExternalStorageDirectory()
         dir = root
+        Thread { trimCache() }.start()
     }
 
     override fun onResume() {
@@ -825,12 +865,15 @@ class MainActivity : Activity() {
         col.addView(frame, lp(-1, 0, 1f))
         selBar = LinearLayout(this)
         selBar.gravity = Gravity.CENTER_VERTICAL
-        selBar.setPadding(dp(8), dp(8), dp(10), dp(8))
+        selBar.setPadding(dp(6), dp(6), dp(6), dp(6))
+        selWrap = HorizontalScrollView(this)
+        selWrap.isHorizontalScrollBarEnabled = false
         val sbg = rounded(alpha(CARD, 0xF5), 20)
         sbg.setStroke(dp(1), alpha(ACC2, 0x55))
-        selBar.background = sbg
-        selBar.visibility = View.GONE
-        col.addView(selBar, lp(-1, -2).also { it.leftMargin = dp(12); it.rightMargin = dp(12); it.bottomMargin = dp(10) })
+        selWrap.background = sbg
+        selWrap.visibility = View.GONE
+        selWrap.addView(selBar)
+        col.addView(selWrap, lp(-1, -2).also { it.leftMargin = dp(12); it.rightMargin = dp(12); it.bottomMargin = dp(10) })
         setContentView(withBg(col))
         list.setOnItemClickListener { _, _, i, _ -> onTap(items[i].f) }
         list.setOnItemLongClickListener { _, _, i, _ -> onLong(items[i].f); true }
@@ -991,14 +1034,29 @@ class MainActivity : Activity() {
             if (isSel) rbg.setStroke(dp(2), ACC2)
             row.background = rbg
 
+            val sz = dp(52)
             if (it0.cat < 0) {
-                row.addView(FolderIcon(this@MainActivity, ACC), lp(dp(48), dp(48)))
+                row.addView(FolderIcon(this@MainActivity, ACC), lp(sz, sz))
             } else {
                 val k = badgeOf(it0)
+                val lead = FrameLayout(this@MainActivity)
                 val badge = txt(k.first, 12f, k.second, true)
                 badge.gravity = Gravity.CENTER
                 badge.background = rounded(alpha(k.second, 0x26), 13)
-                row.addView(badge, lp(dp(48), dp(48)))
+                lead.addView(badge, FrameLayout.LayoutParams(-1, -1))
+                if (it0.cat == 1) {
+                    val iv = ImageView(this@MainActivity)
+                    iv.scaleType = ImageView.ScaleType.CENTER_CROP
+                    iv.outlineProvider = object : android.view.ViewOutlineProvider() {
+                        override fun getOutline(v: View, o: android.graphics.Outline) {
+                            o.setRoundRect(0, 0, v.width, v.height, dp(13).toFloat())
+                        }
+                    }
+                    iv.clipToOutline = true
+                    lead.addView(iv, FrameLayout.LayoutParams(-1, -1))
+                    bindThumb(it0, iv, badge)
+                }
+                row.addView(lead, lp(sz, sz))
             }
 
             val col = LinearLayout(this@MainActivity)
@@ -1048,26 +1106,338 @@ class MainActivity : Activity() {
         updateSelBar()
     }
 
+    private fun actionChip(label: String, danger: Boolean, onClick: () -> Unit): TextView {
+        val red = c(0xFFFB7185)
+        val t = txt(label, 13f, if (danger) red else TXT, true)
+        t.setPadding(dp(14), dp(10), dp(14), dp(10))
+        t.background = rounded(if (danger) alpha(red, 0x26) else alpha(ACC, 0x33), 16)
+        t.setOnClickListener { onClick() }
+        return t
+    }
+
     private fun updateSelBar() {
         selBar.removeAllViews()
         if (selected.isEmpty()) {
-            selBar.visibility = View.GONE
+            selWrap.visibility = View.GONE
             return
         }
-        selBar.visibility = View.VISIBLE
-        val x = txt("✕", 18f, TXT, true)
-        x.setPadding(dp(12), dp(8), dp(12), dp(8))
-        x.setOnClickListener { selected.clear(); refreshSel() }
-        selBar.addView(x)
-        selBar.addView(txt(selected.size.toString() + (if (selected.size == 1) " seleccionado" else " seleccionados"), 14f, TXT, true), lp(0, -2, 1f))
-        if (selected.size >= 2) {
-            val b = primaryButton("Renombre múltiple")
-            b.setOnClickListener { renameMultiSheet() }
-            selBar.addView(b, lp(-2, dp(44)))
-        } else {
-            val b = ghostButton("Acciones")
-            b.setOnClickListener { menu(selected.first()) }
-            selBar.addView(b, lp(-2, dp(44)))
+        selWrap.visibility = View.VISIBLE
+        val files = selected.toList()
+        val one = files.size == 1
+        fun add(label: String, danger: Boolean, onClick: () -> Unit) {
+            selBar.addView(actionChip(label, danger, onClick), lp(-2, -2).also { it.rightMargin = dp(6) })
+        }
+        add("✕ Cancelar", false) {
+            selected.clear()
+            refreshSel()
+        }
+        val cnt = txt(files.size.toString() + (if (one) " seleccionado" else " seleccionados"), 13f, MUTE, true)
+        selBar.addView(cnt, lp(-2, -2).also { it.leftMargin = dp(4); it.rightMargin = dp(10) })
+        if (one) add("✏️ Renombrar", false) { rename(files[0]) } else add("✏️ Renombre múltiple", false) { renameMultiSheet() }
+        add("📋 Copiar", false) { chooseDest(files, false) }
+        add("✂️ Mover", false) { chooseDest(files, true) }
+        add("📤 Compartir", false) { shareFiles(files) }
+        add("ℹ️ Información", false) { infoSheet(files) }
+        if (one && files[0].extension.lowercase() == "zip") {
+            add("🗜 Extraer", false) { confirmSheet("¿Extraer " + files[0].name + "?", "", "Extraer") { extract(files[0]) } }
+        }
+        if (items.count { it.cat >= 0 } > selected.size) add("☑ Seleccionar todo", false) { selectAll() }
+        add("🗑 Eliminar", true) { confirmDeleteFiles(files) }
+    }
+
+    private fun selectAll() {
+        for (x in items) if (x.cat >= 0) selected.add(x.f)
+        refreshSel()
+    }
+
+    // ---------- eliminar, copiar, mover, compartir, información ----------
+    private fun confirmDeleteFiles(files: List<File>) {
+        val title = if (files.size == 1) "¿Eliminar " + files[0].name + "?" else "¿Eliminar " + files.size + " archivos?"
+        confirmSheet(title, "Esta acción no se puede deshacer.", "Eliminar") { deleteFiles(files) }
+    }
+
+    private fun deleteFiles(files: List<File>) {
+        toast("Eliminando…")
+        Thread {
+            var ok = 0
+            val failed = ArrayList<Pair<String, String>>()
+            for (f in files) {
+                try {
+                    java.nio.file.Files.delete(f.toPath())
+                    ok++
+                } catch (e: java.nio.file.NoSuchFileException) {
+                    failed.add(Pair(f.name, "ya no existe"))
+                } catch (e: java.nio.file.AccessDeniedException) {
+                    failed.add(Pair(f.name, "sin permiso para eliminarlo"))
+                } catch (e: Exception) {
+                    failed.add(Pair(f.name, "el sistema no lo permitió"))
+                }
+            }
+            runOnUiThread {
+                selected.clear()
+                if (!inViewer) refresh()
+                reportSheet("eliminados", ok, failed, null)
+            }
+        }.start()
+    }
+
+    private fun chooseDest(files: List<File>, move: Boolean) {
+        val verb = if (move) "Mover" else "Copiar"
+        val src = files[0].parentFile
+        showSheet { d ->
+            var cur: File = dir
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt(verb + " " + (if (files.size == 1) files[0].name else files.size.toString() + " archivos") + " a…", 18f, TXT, true))
+            val pathT = txt("", 12f, ACC2)
+            pathT.setPadding(dp(12), dp(6), dp(12), dp(6))
+            pathT.background = rounded(alpha(ACC, 0x33), 12)
+            col.addView(pathT, lp(-2, -2).also { it.topMargin = dp(10) })
+            val listBox = LinearLayout(this)
+            listBox.orientation = LinearLayout.VERTICAL
+            val sc = MaxScroll(this, (resources.displayMetrics.heightPixels * 0.4f).toInt())
+            sc.addView(listBox)
+            col.addView(sc, lp(-1, -2).also { it.topMargin = dp(8) })
+
+            fun render() {
+                pathT.text = "Almacenamiento interno" + cur.absolutePath.removePrefix(root.absolutePath)
+                listBox.removeAllViews()
+                if (cur != root && cur.parentFile != null) {
+                    val up = optionRow("⬆  Subir", false)
+                    up.setOnClickListener {
+                        cur = cur.parentFile ?: root
+                        render()
+                    }
+                    listBox.addView(up, lp(-1, -2).also { it.topMargin = dp(4) })
+                }
+                val subs = (cur.listFiles() ?: emptyArray<File>()).filter { it.isDirectory }.sortedBy { it.name.lowercase() }
+                for (sf in subs) {
+                    val r = optionRow("📁  " + sf.name, false)
+                    r.setOnClickListener {
+                        cur = sf
+                        render()
+                    }
+                    listBox.addView(r, lp(-1, -2).also { it.topMargin = dp(4) })
+                }
+                if (subs.isEmpty()) listBox.addView(txt("No hay subcarpetas aquí", 13f, MUTE), lp(-2, -2).also { it.topMargin = dp(8) })
+            }
+
+            val btns = LinearLayout(this)
+            val no = ghostButton("Cancelar")
+            no.setOnClickListener { d.dismiss() }
+            val yes = primaryButton(verb + " aquí")
+            yes.setOnClickListener {
+                if (cur.canonicalPath == src?.canonicalPath) {
+                    toast("Elige una carpeta distinta a la actual")
+                } else {
+                    d.dismiss()
+                    transfer(files, cur, move)
+                }
+            }
+            btns.addView(no, lp(0, dp(48), 1f))
+            btns.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+            col.addView(btns, lp(-1, -2).also { it.topMargin = dp(14) })
+            render()
+            col
+        }
+    }
+
+    private fun transfer(files: List<File>, dest: File, move: Boolean) {
+        toast(if (move) "Moviendo…" else "Copiando…")
+        Thread {
+            var ok = 0
+            val failed = ArrayList<Pair<String, String>>()
+            for (f in files) {
+                val dst = File(dest, f.name)
+                try {
+                    if (move) java.nio.file.Files.move(f.toPath(), dst.toPath()) else java.nio.file.Files.copy(f.toPath(), dst.toPath())
+                    ok++
+                } catch (e: java.nio.file.FileAlreadyExistsException) {
+                    failed.add(Pair(f.name, "ya existe un archivo con ese nombre en el destino"))
+                } catch (e: java.nio.file.AccessDeniedException) {
+                    failed.add(Pair(f.name, "sin permiso en la carpeta de destino"))
+                } catch (e: Exception) {
+                    if (!move && dst.exists()) dst.delete()
+                    failed.add(Pair(f.name, "el sistema no lo permitió"))
+                }
+            }
+            runOnUiThread {
+                selected.clear()
+                if (!inViewer) refresh()
+                reportSheet(if (move) "movidos correctamente" else "copiados correctamente", ok, failed, null)
+            }
+        }.start()
+    }
+
+    private fun mimeOf(f: File): String =
+        MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "application/octet-stream"
+
+    private fun shareFiles(files: List<File>) {
+        val uris = ArrayList<Uri>()
+        for (f in files) uris.add(Uri.Builder().scheme("content").authority(SHARE_AUTH).path("/f" + f.absolutePath).build())
+        val mimes = files.map { mimeOf(it) }.distinct()
+        val type = if (mimes.size == 1) mimes[0]
+        else if (mimes.map { it.substringBefore('/') }.distinct().size == 1) mimes[0].substringBefore('/') + "/*"
+        else "*/*"
+        val intent = Intent(if (uris.size == 1) Intent.ACTION_SEND else Intent.ACTION_SEND_MULTIPLE)
+        if (uris.size == 1) intent.putExtra(Intent.EXTRA_STREAM, uris[0]) else intent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+        intent.type = type
+        val cd = ClipData.newRawUri("", uris[0])
+        for (i in 1 until uris.size) cd.addItem(ClipData.Item(uris[i]))
+        intent.clipData = cd
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            startActivity(Intent.createChooser(intent, "Compartir"))
+        } catch (e: Exception) {
+            toast("No se pudo abrir el menú de compartir")
+        }
+    }
+
+    private fun infoSheet(files: List<File>) {
+        showSheet(false) { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt("Información", 20f, TXT, true))
+            val rows = ArrayList<Pair<String, String>>()
+            if (files.size == 1) {
+                val f = files[0]
+                val ex = f.extension.lowercase()
+                rows.add(Pair("Nombre", f.name))
+                rows.add(Pair("Formato", (if (ex.isEmpty()) "Sin extensión" else ex.uppercase()) + "  ·  " + mimeOf(f)))
+                rows.add(Pair("Tamaño", fmt(f.length()) + "  (" + f.length() + " bytes)"))
+                if (catOf(f) == 1) {
+                    val o = BitmapFactory.Options()
+                    o.inJustDecodeBounds = true
+                    BitmapFactory.decodeFile(f.path, o)
+                    if (o.outWidth > 0) rows.add(Pair("Dimensiones", o.outWidth.toString() + " × " + o.outHeight))
+                }
+                rows.add(Pair("Ubicación", f.parent ?: ""))
+                rows.add(Pair("Modificado", dateFull.format(Date(f.lastModified()))))
+            } else {
+                rows.add(Pair("Archivos", files.size.toString()))
+                rows.add(Pair("Tamaño total", fmt(files.sumOf { it.length() })))
+                val exts = files.map { it.extension.lowercase() }.filter { it.isNotEmpty() }.distinct()
+                rows.add(Pair("Formatos", if (exts.isEmpty()) "Sin extensión" else exts.take(8).joinToString(", ") { it.uppercase() } + (if (exts.size > 8) "…" else "")))
+                rows.add(Pair("Ubicación", files[0].parent ?: ""))
+                val mods = files.map { it.lastModified() }
+                rows.add(Pair("Modificados", "desde " + dateFull.format(Date(mods.min())) + " hasta " + dateFull.format(Date(mods.max()))))
+            }
+            val box = LinearLayout(this)
+            box.orientation = LinearLayout.VERTICAL
+            for (r in rows) {
+                box.addView(txt(r.first, 12f, ACC2, true), lp(-1, -2).also { it.topMargin = dp(12) })
+                box.addView(txt(r.second, 14f, TXT), lp(-1, -2).also { it.topMargin = dp(2) })
+            }
+            val sc = MaxScroll(this, (resources.displayMetrics.heightPixels * 0.55f).toInt())
+            sc.addView(box)
+            col.addView(sc, lp(-1, -2))
+            val ok = primaryButton("Cerrar")
+            ok.setOnClickListener { d.dismiss() }
+            col.addView(ok, lp(-1, dp(48)).also { it.topMargin = dp(16) })
+            col
+        }
+    }
+
+    // ---------- miniaturas ----------
+    private fun sha1(s: String): String {
+        val dg = java.security.MessageDigest.getInstance("SHA-1").digest(s.toByteArray())
+        val sb = StringBuilder()
+        for (b in dg) sb.append(String.format("%02x", b))
+        return sb.toString()
+    }
+
+    private fun bindThumb(item: Item, iv: ImageView, badge: View) {
+        val key = item.f.absolutePath + "|" + item.mod + "|" + item.size
+        iv.tag = key
+        val hit = memCache.get(key)
+        if (hit != null) {
+            iv.setImageBitmap(hit)
+            badge.visibility = View.INVISIBLE
+            return
+        }
+        if (failedThumbs.contains(key)) return
+        thumbPool.execute {
+            val bm = thumbFor(item.f, key)
+            if (bm == null) {
+                failedThumbs.add(key)
+            } else {
+                memCache.put(key, bm)
+                runOnUiThread {
+                    if (iv.tag == key) {
+                        iv.setImageBitmap(bm)
+                        badge.visibility = View.INVISIBLE
+                    }
+                }
+            }
+        }
+    }
+
+    private fun thumbFor(f: File, key: String): Bitmap? {
+        val target = thumbPx
+        val td = File(cacheDir, "thumbs")
+        td.mkdirs()
+        val cf = File(td, sha1(key) + ".jpg")
+        if (cf.exists()) {
+            val b = BitmapFactory.decodeFile(cf.path)
+            if (b != null) {
+                cf.setLastModified(System.currentTimeMillis())
+                return b
+            }
+            cf.delete()
+        }
+        try {
+            val o = BitmapFactory.Options()
+            o.inJustDecodeBounds = true
+            BitmapFactory.decodeFile(f.path, o)
+            if (o.outWidth <= 0 || o.outHeight <= 0) return null
+            var s = 1
+            while (minOf(o.outWidth, o.outHeight) / (s * 2) >= target) s *= 2
+            val o2 = BitmapFactory.Options()
+            o2.inSampleSize = s
+            val bm = BitmapFactory.decodeFile(f.path, o2) ?: return null
+            var rot = 0
+            try {
+                val ori = ExifInterface(f.path).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1)
+                rot = if (ori == 6) 90 else if (ori == 3) 180 else if (ori == 8) 270 else 0
+            } catch (e: Exception) {
+                rot = 0
+            }
+            val out = Bitmap.createBitmap(target, target, Bitmap.Config.ARGB_8888)
+            val cv = Canvas(out)
+            cv.drawColor(c(0xFF1A2342))
+            val bw = bm.width.toFloat()
+            val bh = bm.height.toFloat()
+            val m = Matrix()
+            m.postTranslate(-bw / 2f, -bh / 2f)
+            m.postRotate(rot.toFloat())
+            val rw = if (rot == 90 || rot == 270) bh else bw
+            val rh = if (rot == 90 || rot == 270) bw else bh
+            val sc = maxOf(target / rw, target / rh)
+            m.postScale(sc, sc)
+            m.postTranslate(target / 2f, target / 2f)
+            cv.drawBitmap(bm, m, Paint(Paint.FILTER_BITMAP_FLAG))
+            bm.recycle()
+            try {
+                cf.outputStream().use { os -> out.compress(Bitmap.CompressFormat.JPEG, 85, os) }
+            } catch (e: Exception) {
+            }
+            return out
+        } catch (e: Throwable) {
+            return null
+        }
+    }
+
+    private fun trimCache() {
+        try {
+            val fs = File(cacheDir, "thumbs").listFiles() ?: return
+            var total = fs.sumOf { it.length() }
+            if (total <= 80L * 1024 * 1024) return
+            for (x in fs.sortedBy { it.lastModified() }) {
+                if (total <= 50L * 1024 * 1024) break
+                total -= x.length()
+                x.delete()
+            }
+        } catch (e: Exception) {
         }
     }
 
@@ -1076,11 +1446,12 @@ class MainActivity : Activity() {
         return if (i > 0 && i < name.length - 1) name.substring(i) else ""
     }
 
-    private fun buildPlan(files: List<File>, base: String, sep: String, start: Long, pad: Int, orderIdx: Int): List<Plan> {
+    private fun buildPlan(files: List<File>, base: String, sep: String, start: Long, pad: Int, orderIdx: Int, listFiles: List<File>): List<Plan> {
         val sorted = when (orderIdx) {
-            1 -> files.sortedBy { it.name.lowercase() }
-            2 -> files.sortedBy { it.lastModified() }
-            3 -> files.sortedBy { it.length() }
+            1 -> listFiles
+            2 -> files.sortedBy { it.name.lowercase() }
+            3 -> files.sortedBy { it.lastModified() }
+            4 -> files.sortedBy { it.length() }
             else -> files
         }
         val existing = HashSet<String>()
@@ -1193,8 +1564,12 @@ class MainActivity : Activity() {
         }
         val seps = listOf("#", "-", "_", "espacio", "ninguno")
         val sepVals = listOf("#", "-", "_", " ", "")
+        val idx = HashMap<File, Int>()
+        for ((i, x) in items.withIndex()) idx[x.f] = i
+        val listFiles = files.sortedBy { idx[it] ?: Int.MAX_VALUE }
         val notas = listOf(
             "Se numerarán en el orden en que los seleccionaste.",
+            "Se numerarán en el mismo orden en que aparecen en la lista de Nexora.",
             "Se numerarán por nombre, de la A a la Z.",
             "Se numerarán por fecha de modificación, del más antiguo al más reciente.",
             "Se numerarán por tamaño, del más pequeño al más grande."
@@ -1222,6 +1597,7 @@ class MainActivity : Activity() {
 
             val info = txt("", 13f, MUTE, true)
             val orderNote = txt(notas[0], 12f, MUTE)
+            val ejemplo = txt("", 12f, MUTE)
             val preview = LinearLayout(this)
             preview.orientation = LinearLayout.VERTICAL
             val yes = primaryButton("Renombrar")
@@ -1232,6 +1608,10 @@ class MainActivity : Activity() {
                 val b = base.trim()
                 val st = startTxt.toLongOrNull()
                 current = emptyList()
+                val exBase = if (b.isEmpty() || b.contains('/')) "Foto" else b
+                val exStart = if (st != null && st in 0L..999999999L) st else 1L
+                val ex = buildPlan(files, exBase, sepVals[sepIdx], exStart, padIdx + 1, orderIdx, listFiles).take(3).map { it.newName }
+                ejemplo.text = "Ejemplo: " + ex.joinToString(", ") + (if (files.size > 3) "…" else "")
                 var canGo = false
                 if (b.isEmpty() || b.contains('/') || b.length > 120) {
                     info.text = "Escribe un nombre base (sin “/”) para ver la vista previa."
@@ -1240,7 +1620,7 @@ class MainActivity : Activity() {
                     info.text = "El número inicial no es válido."
                     info.setTextColor(MUTE)
                 } else {
-                    val plan = buildPlan(files, b, sepVals[sepIdx], st ?: 0L, padIdx + 1, orderIdx)
+                    val plan = buildPlan(files, b, sepVals[sepIdx], st ?: 0L, padIdx + 1, orderIdx, listFiles)
                     current = plan
                     val bad = plan.count { !it.ok }
                     val changes = plan.count { it.ok && it.newName != it.orig.name }
@@ -1265,7 +1645,8 @@ class MainActivity : Activity() {
             val form = LinearLayout(this)
             form.orientation = LinearLayout.VERTICAL
             form.addView(label("Nombre base"))
-            form.addView(field("Ej.: Aby", false, "") { base = it; update() }, lp(-1, -2).also { it.topMargin = dp(6) })
+            form.addView(field("Ej.: Foto", false, "") { base = it; update() }, lp(-1, -2).also { it.topMargin = dp(6) })
+            form.addView(ejemplo, lp(-1, -2).also { it.topMargin = dp(6) })
             form.addView(label("Separador"))
             form.addView(chipGroup(seps, 0) { sepIdx = it; update() }, lp(-1, -2).also { it.topMargin = dp(6) })
             form.addView(label("Número inicial"))
@@ -1273,7 +1654,7 @@ class MainActivity : Activity() {
             form.addView(label("Dígitos (ceros iniciales)"))
             form.addView(chipGroup(listOf("1", "01", "001", "0001"), 0) { padIdx = it; update() }, lp(-1, -2).also { it.topMargin = dp(6) })
             form.addView(label("Orden de numeración"))
-            form.addView(chipGroup(listOf("Selección", "Nombre", "Fecha", "Tamaño"), 0) { orderIdx = it; update() }, lp(-1, -2).also { it.topMargin = dp(6) })
+            form.addView(chipGroup(listOf("Selección", "Lista", "Nombre", "Fecha", "Tamaño"), 0) { orderIdx = it; update() }, lp(-1, -2).also { it.topMargin = dp(6) })
             form.addView(orderNote, lp(-1, -2).also { it.topMargin = dp(6) })
             form.addView(label("Vista previa"))
             form.addView(info, lp(-1, -2).also { it.topMargin = dp(6) })
@@ -1327,25 +1708,33 @@ class MainActivity : Activity() {
     }
 
     private fun resultSheet(done: List<Pair<File, File>>, failed: List<Pair<String, String>>) {
+        val u: () -> Unit = { undoRename(done) }
+        reportSheet("renombrados correctamente", done.size, failed, if (done.isNotEmpty()) u else null)
+    }
+
+    private fun reportSheet(okText: String, done: Int, failed: List<Pair<String, String>>, undo: (() -> Unit)?) {
         showSheet(false) { d ->
             val col = LinearLayout(this)
             col.orientation = LinearLayout.VERTICAL
-            col.addView(txt(if (failed.isEmpty()) "Listo" else "Terminó con errores", 20f, TXT, true))
-            col.addView(txt("✓ " + done.size + " renombrados correctamente", 14f, GREEN, true), lp(-1, -2).also { it.topMargin = dp(10) })
+            col.addView(txt(if (failed.isEmpty()) "Listo" else if (done == 0) "No se pudo completar" else "Terminó con errores", 20f, TXT, true))
+            if (done > 0) col.addView(txt("✓ " + done + " " + okText, 14f, GREEN, true), lp(-1, -2).also { it.topMargin = dp(10) })
             if (failed.isNotEmpty()) {
-                col.addView(txt("✕ " + failed.size + " no se pudieron renombrar", 14f, c(0xFFFB7185), true), lp(-1, -2).also { it.topMargin = dp(6) })
+                col.addView(txt("✕ " + failed.size + " no se pudieron procesar", 14f, c(0xFFFB7185), true), lp(-1, -2).also { it.topMargin = dp(6) })
                 for (fp in failed.take(8)) col.addView(txt(fp.first + " — " + fp.second, 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
                 if (failed.size > 8) col.addView(txt("… y " + (failed.size - 8) + " más", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
             }
             val btns = LinearLayout(this)
-            if (done.isNotEmpty()) {
-                val undo = ghostButton("Deshacer todo")
-                undo.setOnClickListener { d.dismiss(); undoRename(done) }
-                btns.addView(undo, lp(0, dp(48), 1f))
+            if (undo != null && done > 0) {
+                val ub = ghostButton("Deshacer todo")
+                ub.setOnClickListener {
+                    d.dismiss()
+                    undo()
+                }
+                btns.addView(ub, lp(0, dp(48), 1f))
             }
             val ok = primaryButton("Listo")
             ok.setOnClickListener { d.dismiss() }
-            btns.addView(ok, lp(0, dp(48), 1f).also { if (done.isNotEmpty()) it.leftMargin = dp(10) })
+            btns.addView(ok, lp(0, dp(48), 1f).also { if (undo != null && done > 0) it.leftMargin = dp(10) })
             col.addView(btns, lp(-1, -2).also { it.topMargin = dp(18) })
             col
         }
@@ -1624,4 +2013,55 @@ class MainActivity : Activity() {
             super.onBackPressed()
         }
     }
+}
+
+
+private const val SHARE_AUTH = "com.gestor.archivos.share"
+
+private class LifoQueue : java.util.concurrent.LinkedBlockingDeque<Runnable>() {
+    override fun offer(e: Runnable): Boolean {
+        if (size > 400) pollLast()
+        return offerFirst(e)
+    }
+}
+
+class ShareProvider : ContentProvider() {
+    private fun fileOf(uri: Uri): File? {
+        val p = uri.path ?: return null
+        if (!p.startsWith("/f/")) return null
+        val f = File(p.substring(2))
+        return if (f.isFile) f else null
+    }
+
+    override fun onCreate(): Boolean = true
+
+    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
+        val f = fileOf(uri) ?: throw FileNotFoundException("no encontrado")
+        return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+    }
+
+    override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? {
+        val f = fileOf(uri) ?: return null
+        val cols: Array<String> = if (projection != null) Array(projection.size) { projection[it] } else arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
+        val cur = MatrixCursor(cols)
+        val row = arrayOfNulls<Any>(cols.size)
+        for (i in cols.indices) {
+            row[i] = when (cols[i]) {
+                OpenableColumns.DISPLAY_NAME -> f.name
+                OpenableColumns.SIZE -> f.length()
+                else -> null
+            }
+        }
+        cur.addRow(row)
+        return cur
+    }
+
+    override fun getType(uri: Uri): String? {
+        val f = fileOf(uri) ?: return null
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "application/octet-stream"
+    }
+
+    override fun insert(uri: Uri, values: ContentValues?): Uri? = null
+    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
+    override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = 0
 }
