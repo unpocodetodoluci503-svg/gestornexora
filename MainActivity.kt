@@ -18,6 +18,7 @@ import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -59,6 +60,7 @@ private data class Entrada(val version: String, val fecha: String?, val titulo: 
 private data class Fondo(val nombre: String, val top: Int, val bottom: Int, val card: Int)
 private data class Acento(val nombre: String, val c1: Int, val c2: Int)
 private class Plan(val orig: File, val newName: String, val status: String, val ok: Boolean)
+private class MEntry(val icon: Int, val label: String, val danger: Boolean, val group: Int, val dot: Boolean, val action: () -> Unit)
 
 class MainActivity : Activity() {
 
@@ -141,7 +143,25 @@ class MainActivity : Activity() {
                     "Cada operación informa qué archivos se procesaron y cuáles fallaron",
                     "Extraer ZIP desde la barra de acciones")),
                 Seccion("Correcciones", listOf(
-                    "Con un solo archivo seleccionado, Renombrar ya aparece directamente en la barra"))))
+                    "Con un solo archivo seleccionado, Renombrar ya aparece directamente en la barra")))),
+        Entrada("0.3.3", null, "Menú más limpio",
+            "El menú de tres puntos ahora se despliega justo debajo del botón, con íconos propios.",
+            listOf(Seccion("Mejoras visuales", listOf(
+                "Menú desplegable bajo los tres puntos, con las opciones una debajo de otra",
+                "Íconos dibujados a medida, sin emojis, y fondo sólido con borde sutil",
+                "Se cierra al elegir una opción, al tocar fuera o al pulsar otra vez los tres puntos",
+                "Se ajusta a los bordes de la pantalla para no salirse")))),
+        Entrada("0.3.4", null, "Menú de archivos renovado",
+            "Las acciones de un archivo ahora salen en un menú vertical, junto a él y mejor organizadas.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Menú vertical junto al archivo al mantenerlo pulsado, con las acciones agrupadas y Eliminar separado")),
+                Seccion("Mejoras visuales", listOf(
+                    "Íconos dibujados a medida en lugar de emojis",
+                    "Barra de selección compacta con Cancelar y Acciones",
+                    "El menú se coloca arriba o abajo según el espacio y no se sale de la pantalla")),
+                Seccion("Mejoras", listOf(
+                    "Las carpetas tienen su menú con Abrir, Renombrar y Eliminar"))))
     )
 
     private val pendientes = listOf(
@@ -198,6 +218,8 @@ class MainActivity : Activity() {
     private val selected = LinkedHashSet<File>()
     private lateinit var selBar: LinearLayout
     private lateinit var selWrap: HorizontalScrollView
+    private var menuPop: PopupWindow? = null
+    private var menuClosedAt = 0L
     private val dateFull = SimpleDateFormat("d MMM yyyy, HH:mm", Locale("es"))
     private val thumbPx: Int get() = dp(52)
     private val memCache = object : android.util.LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 10).toInt()) {
@@ -385,20 +407,6 @@ class MainActivity : Activity() {
         return t
     }
 
-    private fun optionsSheet(title: String, labels: List<String>, onPick: (Int) -> Unit) {
-        showSheet { d ->
-            val col = LinearLayout(this)
-            col.orientation = LinearLayout.VERTICAL
-            col.addView(txt(title, 18f, TXT, true))
-            for (i in labels.indices) {
-                val r = optionRow(labels[i], false)
-                r.setOnClickListener { d.dismiss(); onPick(i) }
-                col.addView(r, lp(-1, -2).also { it.topMargin = dp(6) })
-            }
-            col
-        }
-    }
-
     private fun confirmSheet(title: String, msg: String, ok: String, onOk: () -> Unit) {
         showSheet(false) { d ->
             val col = LinearLayout(this)
@@ -526,40 +534,6 @@ class MainActivity : Activity() {
         b.setPadding(dp(16), dp(14), dp(16), dp(14))
         b.background = rounded(alpha(CARD, 0xE6), 18)
         return b
-    }
-
-    private fun menuSheet() {
-        showSheet { d ->
-            val row = LinearLayout(this)
-            val defs = listOf(Triple("👤", "Perfil", 0), Triple("✨", "Novedades", 1), Triple("🎨", "Personalización", 2), Triple("⚙️", "Configuración", 3))
-            for (df in defs) {
-                val cell = LinearLayout(this)
-                cell.orientation = LinearLayout.VERTICAL
-                cell.gravity = Gravity.CENTER_HORIZONTAL
-                val ic = txt(df.first, 24f, TXT)
-                ic.gravity = Gravity.CENTER
-                ic.background = rounded(alpha(ACC, 0x2E), 16)
-                cell.addView(ic, lp(dp(54), dp(54)))
-                val lab = LinearLayout(this)
-                lab.gravity = Gravity.CENTER_VERTICAL
-                val lt = txt(df.second, 10f, TXT)
-                lt.isSingleLine = true
-                lab.addView(lt)
-                if (df.third == 1 && hasUnseen()) lab.addView(dot(), lp(dp(8), dp(8)).also { it.leftMargin = dp(3) })
-                cell.addView(lab, lp(-2, -2).also { it.topMargin = dp(8) })
-                cell.setOnClickListener {
-                    d.dismiss()
-                    when (df.third) {
-                        0 -> showProfile()
-                        1 -> showNews()
-                        2 -> showPersonalization()
-                        else -> showSettings()
-                    }
-                }
-                row.addView(cell, lp(0, -2, 1f))
-            }
-            row
-        }
     }
 
     private fun showProfile() {
@@ -833,7 +807,7 @@ class MainActivity : Activity() {
         val dots = txt("⋮", 24f, TXT, true)
         dots.gravity = Gravity.CENTER
         dots.background = rounded(alpha(ACC, 0x33), 14)
-        dots.setOnClickListener { menuSheet() }
+        dots.setOnClickListener { openMenu(dots, null, dotsEntries()) }
         top.addView(dots, lp(dp(44), dp(44)))
         head.addView(top, lp(-1, -2))
         pathView = txt("", 12f, ACC2)
@@ -868,6 +842,7 @@ class MainActivity : Activity() {
         selBar.setPadding(dp(6), dp(6), dp(6), dp(6))
         selWrap = HorizontalScrollView(this)
         selWrap.isHorizontalScrollBarEnabled = false
+        selWrap.isFillViewport = true
         val sbg = rounded(alpha(CARD, 0xF5), 20)
         sbg.setStroke(dp(1), alpha(ACC2, 0x55))
         selWrap.background = sbg
@@ -876,7 +851,7 @@ class MainActivity : Activity() {
         col.addView(selWrap, lp(-1, -2).also { it.leftMargin = dp(12); it.rightMargin = dp(12); it.bottomMargin = dp(10) })
         setContentView(withBg(col))
         list.setOnItemClickListener { _, _, i, _ -> onTap(items[i].f) }
-        list.setOnItemLongClickListener { _, _, i, _ -> onLong(items[i].f); true }
+        list.setOnItemLongClickListener { _, v, i, _ -> onLong(items[i].f, v); true }
         refresh()
     }
 
@@ -1088,12 +1063,20 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onLong(f: File) {
+    private fun onLong(f: File, v: View) {
         if (f.isDirectory) {
-            if (selected.isEmpty()) menu(f) else toast("Las carpetas no se pueden seleccionar")
-        } else {
-            toggle(f)
+            if (selected.isEmpty()) openMenu(v, f.name, folderEntries(f)) else toast("Las carpetas no se pueden seleccionar")
+            return
         }
+        val first = selected.isEmpty()
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        val rl = loc[0]
+        val rt = loc[1]
+        val rr = loc[0] + v.width
+        val rb = loc[1] + v.height
+        toggle(f)
+        if (first) openMenuAt(rl, rt, rr, rb, f.name, fileEntries(selected.toList()))
     }
 
     private fun toggle(f: File) {
@@ -1106,15 +1089,6 @@ class MainActivity : Activity() {
         updateSelBar()
     }
 
-    private fun actionChip(label: String, danger: Boolean, onClick: () -> Unit): TextView {
-        val red = c(0xFFFB7185)
-        val t = txt(label, 13f, if (danger) red else TXT, true)
-        t.setPadding(dp(14), dp(10), dp(14), dp(10))
-        t.background = rounded(if (danger) alpha(red, 0x26) else alpha(ACC, 0x33), 16)
-        t.setOnClickListener { onClick() }
-        return t
-    }
-
     private fun updateSelBar() {
         selBar.removeAllViews()
         if (selected.isEmpty()) {
@@ -1122,27 +1096,166 @@ class MainActivity : Activity() {
             return
         }
         selWrap.visibility = View.VISIBLE
-        val files = selected.toList()
-        val one = files.size == 1
-        fun add(label: String, danger: Boolean, onClick: () -> Unit) {
-            selBar.addView(actionChip(label, danger, onClick), lp(-2, -2).also { it.rightMargin = dp(6) })
-        }
-        add("✕ Cancelar", false) {
+        val cancel = LinearLayout(this)
+        cancel.gravity = Gravity.CENTER_VERTICAL
+        cancel.setPadding(dp(12), dp(10), dp(14), dp(10))
+        cancel.background = rounded(alpha(Color.WHITE, 0x16), 16)
+        cancel.addView(MenuIcon(this, 16, TXT), lp(dp(16), dp(16)))
+        cancel.addView(txt("Cancelar", 13f, TXT, true), lp(-2, -2).also { it.leftMargin = dp(8) })
+        cancel.setOnClickListener {
             selected.clear()
             refreshSel()
         }
-        val cnt = txt(files.size.toString() + (if (one) " seleccionado" else " seleccionados"), 13f, MUTE, true)
-        selBar.addView(cnt, lp(-2, -2).also { it.leftMargin = dp(4); it.rightMargin = dp(10) })
-        if (one) add("✏️ Renombrar", false) { rename(files[0]) } else add("✏️ Renombre múltiple", false) { renameMultiSheet() }
-        add("📋 Copiar", false) { chooseDest(files, false) }
-        add("✂️ Mover", false) { chooseDest(files, true) }
-        add("📤 Compartir", false) { shareFiles(files) }
-        add("ℹ️ Información", false) { infoSheet(files) }
-        if (one && files[0].extension.lowercase() == "zip") {
-            add("🗜 Extraer", false) { confirmSheet("¿Extraer " + files[0].name + "?", "", "Extraer") { extract(files[0]) } }
+        selBar.addView(cancel)
+        val n = selected.size
+        selBar.addView(txt(if (n == 1) "1 seleccionado" else n.toString() + " seleccionados", 13f, MUTE, true), lp(0, -2, 1f).also { it.leftMargin = dp(12); it.rightMargin = dp(8) })
+        val acc = LinearLayout(this)
+        acc.gravity = Gravity.CENTER_VERTICAL
+        acc.setPadding(dp(14), dp(10), dp(16), dp(10))
+        val ag = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(ACC, mix(ACC, Color.BLACK, 0.35f)))
+        ag.cornerRadius = dp(16).toFloat()
+        acc.background = ag
+        acc.addView(MenuIcon(this, 15, Color.WHITE), lp(dp(16), dp(16)))
+        acc.addView(txt("Acciones", 13f, Color.WHITE, true), lp(-2, -2).also { it.leftMargin = dp(8) })
+        acc.setOnClickListener {
+            val files = selected.toList()
+            openMenu(acc, if (files.size == 1) files[0].name else files.size.toString() + " archivos seleccionados", fileEntries(files))
         }
-        if (items.count { it.cat >= 0 } > selected.size) add("☑ Seleccionar todo", false) { selectAll() }
-        add("🗑 Eliminar", true) { confirmDeleteFiles(files) }
+        selBar.addView(acc)
+    }
+
+    private fun fileEntries(files: List<File>): List<MEntry> {
+        val out = ArrayList<MEntry>()
+        if (files.isEmpty()) return out
+        val one = files.size == 1
+        val f0 = files[0]
+        val ext = f0.extension.lowercase()
+        val previewable = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "mp4", "mkv", "webm", "3gp", "mov", "pdf")
+        if (one && ext in previewable) out.add(MEntry(4, "Abrir", false, 0, false) { tap(f0) })
+        if (one && ext == "zip") out.add(MEntry(12, "Extraer aquí", false, 0, false) { confirmSheet("¿Extraer " + f0.name + "?", "", "Extraer") { extract(f0) } })
+        out.add(MEntry(5, "Compartir", false, 0, false) { shareFiles(files) })
+        out.add(MEntry(6, "Copiar a…", false, 1, false) { chooseDest(files, false) })
+        out.add(MEntry(7, "Mover a…", false, 1, false) { chooseDest(files, true) })
+        if (one) out.add(MEntry(8, "Renombrar", false, 1, false) { rename(f0) })
+        else out.add(MEntry(8, "Renombre múltiple", false, 1, false) { renameMultiSheet() })
+        out.add(MEntry(9, "Información", false, 2, false) { infoSheet(files) })
+        if (items.count { it.cat >= 0 } > selected.size) out.add(MEntry(10, "Seleccionar todo", false, 2, false) { selectAll() })
+        out.add(MEntry(11, if (one) "Eliminar" else "Eliminar " + files.size + " archivos", true, 3, false) { confirmDeleteFiles(files) })
+        return out
+    }
+
+    private fun folderEntries(f: File): List<MEntry> = listOf(
+        MEntry(14, "Abrir", false, 0, false) {
+            dir = f
+            refresh()
+        },
+        MEntry(8, "Renombrar", false, 1, false) { rename(f) },
+        MEntry(11, "Eliminar carpeta", true, 2, false) {
+            confirmSheet("¿Eliminar la carpeta " + f.name + "?", "Se borrará con todo lo que contiene. Esta acción no se puede deshacer.", "Eliminar") {
+                toast("Eliminando…")
+                Thread {
+                    val ok = f.deleteRecursively()
+                    runOnUiThread {
+                        if (!inViewer) refresh()
+                        if (!ok) toast("No se pudo eliminar por completo la carpeta")
+                    }
+                }.start()
+            }
+        }
+    )
+
+    private fun dotsEntries(): List<MEntry> = listOf(
+        MEntry(0, "Perfil", false, 0, false) { showProfile() },
+        MEntry(1, "Novedades", false, 0, hasUnseen()) { showNews() },
+        MEntry(2, "Personalización", false, 0, false) { showPersonalization() },
+        MEntry(3, "Configuración", false, 0, false) { showSettings() }
+    )
+
+    private fun openMenu(anchor: View, title: String?, entries: List<MEntry>) {
+        val loc = IntArray(2)
+        anchor.getLocationOnScreen(loc)
+        openMenuAt(loc[0], loc[1], loc[0] + anchor.width, loc[1] + anchor.height, title, entries)
+    }
+
+    private fun openMenuAt(l: Int, t: Int, r: Int, b: Int, title: String?, entries: List<MEntry>) {
+        val cur = menuPop
+        if (cur != null && cur.isShowing) {
+            cur.dismiss()
+            return
+        }
+        if (System.currentTimeMillis() - menuClosedAt < 400) return
+        val sw = resources.displayMetrics.widthPixels
+        val sh = resources.displayMetrics.heightPixels
+        val pw = minOf(dp(244), sw - dp(24))
+        val card = LinearLayout(this)
+        card.orientation = LinearLayout.VERTICAL
+        card.setPadding(dp(6), dp(6), dp(6), dp(6))
+        val g = rounded(CARD, 14)
+        g.setStroke(dp(1), alpha(Color.WHITE, 0x26))
+        card.background = g
+        val popup = PopupWindow(card, pw, ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        popup.isOutsideTouchable = true
+        popup.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        popup.setOnDismissListener {
+            menuClosedAt = System.currentTimeMillis()
+            menuPop = null
+        }
+        if (title != null) {
+            val ht = txt(title, 12f, MUTE, true)
+            ht.isSingleLine = true
+            ht.ellipsize = TextUtils.TruncateAt.MIDDLE
+            ht.setPadding(dp(12), dp(8), dp(12), dp(6))
+            card.addView(ht, lp(-1, -2))
+        }
+        val listBox = LinearLayout(this)
+        listBox.orientation = LinearLayout.VERTICAL
+        val red = c(0xFFFB7185)
+        var lastGroup = -1
+        for ((i, e) in entries.withIndex()) {
+            if (i > 0 && e.group != lastGroup) {
+                val sp = View(this)
+                sp.setBackgroundColor(alpha(Color.WHITE, 0x1F))
+                listBox.addView(sp, lp(-1, dp(1)).also {
+                    it.topMargin = if (e.danger) dp(8) else dp(4)
+                    it.bottomMargin = dp(4)
+                    it.leftMargin = dp(8)
+                    it.rightMargin = dp(8)
+                })
+            }
+            lastGroup = e.group
+            val color = if (e.danger) red else TXT
+            val row = LinearLayout(this)
+            row.gravity = Gravity.CENTER_VERTICAL
+            row.setPadding(dp(12), 0, dp(12), 0)
+            val sl = android.graphics.drawable.StateListDrawable()
+            sl.addState(intArrayOf(android.R.attr.state_pressed), rounded(alpha(if (e.danger) red else ACC, 0x33), 10))
+            sl.addState(intArrayOf(), ColorDrawable(Color.TRANSPARENT))
+            row.background = sl
+            row.addView(MenuIcon(this, e.icon, color), lp(dp(22), dp(22)))
+            val lab = txt(e.label, 15f, color)
+            lab.isSingleLine = true
+            lab.ellipsize = TextUtils.TruncateAt.END
+            row.addView(lab, lp(0, -2, 1f).also { it.leftMargin = dp(14) })
+            if (e.dot) row.addView(dot(), lp(dp(8), dp(8)))
+            row.setOnClickListener {
+                popup.dismiss()
+                e.action()
+            }
+            listBox.addView(row, lp(-1, dp(46)))
+        }
+        val sc = MaxScroll(this, (sh * 0.6f).toInt())
+        sc.addView(listBox)
+        card.addView(sc, lp(-1, -2))
+
+        card.measure(View.MeasureSpec.makeMeasureSpec(pw, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+        val mh = card.measuredHeight
+        val margin = dp(8)
+        val x = (r - pw).coerceIn(margin, maxOf(margin, sw - pw - margin))
+        val y = if (mh <= sh - b - margin) b + dp(4)
+        else if (mh <= t - margin) t - mh - dp(4)
+        else maxOf(margin, (sh - mh) / 2)
+        menuPop = popup
+        popup.showAtLocation(window.decorView, Gravity.TOP or Gravity.START, x, y)
     }
 
     private fun selectAll() {
@@ -1772,20 +1885,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun menu(f: File) {
-        val opts = mutableListOf("Renombrar", "Eliminar")
-        if (f.extension.lowercase() == "zip") opts.add("Extraer aquí")
-        optionsSheet(f.name, opts) { w ->
-            when (opts[w]) {
-                "Renombrar" -> rename(f)
-                "Eliminar" -> confirmSheet("¿Eliminar " + f.name + "?", "Esta acción no se puede deshacer.", "Eliminar") {
-                    if (f.deleteRecursively()) refresh() else toast("No se pudo eliminar")
-                }
-                else -> extract(f)
-            }
-        }
-    }
-
     private fun rename(f: File) {
         showSheet(false) { d ->
             val col = LinearLayout(this)
@@ -2064,4 +2163,162 @@ class ShareProvider : ContentProvider() {
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = 0
+}
+
+
+private class MenuIcon(ctx: Context, val kind: Int, val col: Int) : View(ctx) {
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    init {
+        p.style = Paint.Style.STROKE
+        p.strokeCap = Paint.Cap.ROUND
+        p.strokeJoin = Paint.Join.ROUND
+        p.color = col
+    }
+
+    override fun onDraw(cv: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        p.strokeWidth = w * 0.09f
+        p.style = Paint.Style.STROKE
+        val path = Path()
+        when (kind) {
+            0 -> {
+                cv.drawCircle(w * 0.5f, h * 0.33f, w * 0.17f, p)
+                cv.drawArc(RectF(w * 0.17f, h * 0.58f, w * 0.83f, h * 1.12f), 200f, 140f, false, p)
+            }
+            1 -> {
+                val cx = w * 0.5f
+                val cy = h * 0.5f
+                path.moveTo(cx, h * 0.10f)
+                path.quadTo(cx, cy, w * 0.90f, cy)
+                path.quadTo(cx, cy, cx, h * 0.90f)
+                path.quadTo(cx, cy, w * 0.10f, cy)
+                path.quadTo(cx, cy, cx, h * 0.10f)
+                cv.drawPath(path, p)
+            }
+            2 -> {
+                val xs = floatArrayOf(0.66f, 0.34f, 0.7f)
+                for (i in 0..2) {
+                    val y = h * (0.24f + 0.26f * i)
+                    cv.drawLine(w * 0.10f, y, w * 0.90f, y, p)
+                }
+                p.style = Paint.Style.FILL
+                for (i in 0..2) cv.drawCircle(w * xs[i], h * (0.24f + 0.26f * i), w * 0.10f, p)
+            }
+            3 -> {
+                val cx = w * 0.5f
+                val cy = h * 0.5f
+                cv.drawCircle(cx, cy, w * 0.14f, p)
+                cv.drawCircle(cx, cy, w * 0.28f, p)
+                for (i in 0 until 8) {
+                    val a = Math.toRadians(i * 45.0)
+                    val c0 = Math.cos(a).toFloat()
+                    val s0 = Math.sin(a).toFloat()
+                    cv.drawLine(cx + c0 * w * 0.28f, cy + s0 * w * 0.28f, cx + c0 * w * 0.40f, cy + s0 * w * 0.40f, p)
+                }
+            }
+            4 -> {
+                path.moveTo(w * 0.06f, h * 0.5f)
+                path.quadTo(w * 0.5f, 0f, w * 0.94f, h * 0.5f)
+                path.quadTo(w * 0.5f, h, w * 0.06f, h * 0.5f)
+                cv.drawPath(path, p)
+                cv.drawCircle(w * 0.5f, h * 0.5f, w * 0.13f, p)
+            }
+            5 -> {
+                cv.drawLine(w * 0.24f, h * 0.5f, w * 0.76f, h * 0.2f, p)
+                cv.drawLine(w * 0.24f, h * 0.5f, w * 0.76f, h * 0.8f, p)
+                p.style = Paint.Style.FILL
+                cv.drawCircle(w * 0.76f, h * 0.2f, w * 0.12f, p)
+                cv.drawCircle(w * 0.24f, h * 0.5f, w * 0.12f, p)
+                cv.drawCircle(w * 0.76f, h * 0.8f, w * 0.12f, p)
+            }
+            6 -> {
+                cv.drawRoundRect(RectF(w * 0.14f, h * 0.32f, w * 0.68f, h * 0.88f), w * 0.08f, w * 0.08f, p)
+                path.moveTo(w * 0.32f, h * 0.32f)
+                path.lineTo(w * 0.32f, h * 0.12f)
+                path.lineTo(w * 0.86f, h * 0.12f)
+                path.lineTo(w * 0.86f, h * 0.68f)
+                path.lineTo(w * 0.68f, h * 0.68f)
+                cv.drawPath(path, p)
+            }
+            7 -> {
+                cv.drawLine(w * 0.12f, h * 0.5f, w * 0.74f, h * 0.5f, p)
+                path.moveTo(w * 0.54f, h * 0.28f)
+                path.lineTo(w * 0.76f, h * 0.5f)
+                path.lineTo(w * 0.54f, h * 0.72f)
+                cv.drawPath(path, p)
+                cv.drawLine(w * 0.9f, h * 0.24f, w * 0.9f, h * 0.76f, p)
+            }
+            8 -> {
+                path.moveTo(w * 0.18f, h * 0.82f)
+                path.lineTo(w * 0.22f, h * 0.62f)
+                path.lineTo(w * 0.62f, h * 0.22f)
+                path.lineTo(w * 0.78f, h * 0.38f)
+                path.lineTo(w * 0.38f, h * 0.78f)
+                path.close()
+                cv.drawPath(path, p)
+                cv.drawLine(w * 0.52f, h * 0.32f, w * 0.68f, h * 0.48f, p)
+            }
+            9 -> {
+                cv.drawCircle(w * 0.5f, h * 0.5f, w * 0.38f, p)
+                cv.drawLine(w * 0.5f, h * 0.46f, w * 0.5f, h * 0.72f, p)
+                p.style = Paint.Style.FILL
+                cv.drawCircle(w * 0.5f, h * 0.31f, w * 0.055f, p)
+            }
+            10 -> {
+                cv.drawRoundRect(RectF(w * 0.14f, h * 0.14f, w * 0.86f, h * 0.86f), w * 0.12f, w * 0.12f, p)
+                path.moveTo(w * 0.3f, h * 0.52f)
+                path.lineTo(w * 0.45f, h * 0.67f)
+                path.lineTo(w * 0.72f, h * 0.36f)
+                cv.drawPath(path, p)
+            }
+            11 -> {
+                cv.drawLine(w * 0.16f, h * 0.26f, w * 0.84f, h * 0.26f, p)
+                path.moveTo(w * 0.38f, h * 0.26f)
+                path.lineTo(w * 0.38f, h * 0.13f)
+                path.lineTo(w * 0.62f, h * 0.13f)
+                path.lineTo(w * 0.62f, h * 0.26f)
+                cv.drawPath(path, p)
+                val bin = Path()
+                bin.moveTo(w * 0.24f, h * 0.26f)
+                bin.lineTo(w * 0.30f, h * 0.88f)
+                bin.lineTo(w * 0.70f, h * 0.88f)
+                bin.lineTo(w * 0.76f, h * 0.26f)
+                cv.drawPath(bin, p)
+                cv.drawLine(w * 0.42f, h * 0.42f, w * 0.42f, h * 0.72f, p)
+                cv.drawLine(w * 0.58f, h * 0.42f, w * 0.58f, h * 0.72f, p)
+            }
+            12 -> {
+                path.moveTo(w * 0.14f, h * 0.58f)
+                path.lineTo(w * 0.14f, h * 0.86f)
+                path.lineTo(w * 0.86f, h * 0.86f)
+                path.lineTo(w * 0.86f, h * 0.58f)
+                cv.drawPath(path, p)
+                cv.drawLine(w * 0.5f, h * 0.12f, w * 0.5f, h * 0.66f, p)
+                val head = Path()
+                head.moveTo(w * 0.3f, h * 0.46f)
+                head.lineTo(w * 0.5f, h * 0.68f)
+                head.lineTo(w * 0.7f, h * 0.46f)
+                cv.drawPath(head, p)
+            }
+            14 -> {
+                cv.drawLine(w * 0.15f, h * 0.5f, w * 0.85f, h * 0.5f, p)
+                path.moveTo(w * 0.55f, h * 0.22f)
+                path.lineTo(w * 0.85f, h * 0.5f)
+                path.lineTo(w * 0.55f, h * 0.78f)
+                cv.drawPath(path, p)
+            }
+            15 -> {
+                p.style = Paint.Style.FILL
+                cv.drawCircle(w * 0.5f, h * 0.2f, w * 0.08f, p)
+                cv.drawCircle(w * 0.5f, h * 0.5f, w * 0.08f, p)
+                cv.drawCircle(w * 0.5f, h * 0.8f, w * 0.08f, p)
+            }
+            16 -> {
+                cv.drawLine(w * 0.22f, h * 0.22f, w * 0.78f, h * 0.78f, p)
+                cv.drawLine(w * 0.78f, h * 0.22f, w * 0.22f, h * 0.78f, p)
+            }
+        }
+    }
 }
