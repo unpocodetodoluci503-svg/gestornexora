@@ -11,8 +11,8 @@ android {
         applicationId = "com.gestor.archivos"
         minSdk = 26
         targetSdk = 34
-        versionCode = 201
-        versionName = "0.2.1"
+        versionCode = 205
+        versionName = "0.2.5"
     }
     signingConfigs {
         getByName("debug") {
