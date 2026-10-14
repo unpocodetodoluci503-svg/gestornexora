@@ -94,6 +94,6 @@ workflows:
         script: |
           curl -sL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o gradle.zip
           unzip -q gradle.zip
-          ./gradle-8.9/bin/gradle assembleDebug --no-daemon
+          ./gradle-8.9/bin/gradle assembleDebug --no-daemon -Pandroid.useAndroidX=true
     artifacts:
       - build/outputs/apk/debug/*.apk

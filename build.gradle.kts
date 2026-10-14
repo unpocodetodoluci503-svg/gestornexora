@@ -11,8 +11,11 @@ android {
         applicationId = "com.gestor.archivos"
         minSdk = 26
         targetSdk = 34
-        versionCode = 309
-        versionName = "0.3.9"
+        versionCode = 402
+        versionName = "0.4.2"
+        ndk {
+            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
+        }
     }
     signingConfigs {
         getByName("debug") {
@@ -29,4 +32,8 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    implementation("com.google.ai.edge.litert:litert:1.4.1")
 }

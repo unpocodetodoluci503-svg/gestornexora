@@ -41,7 +41,10 @@ import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.TextUtils
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
@@ -49,14 +52,19 @@ import android.view.WindowManager
 import android.webkit.MimeTypeMap
 import android.widget.*
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.net.HttpURLConnection
+import java.net.URL
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipInputStream
+import org.tensorflow.lite.DataType
+import org.tensorflow.lite.Interpreter
 
 private fun c(v: Long): Int = v.toInt()
 
@@ -195,7 +203,19 @@ class MainActivity : Activity() {
                     "HD y ULTRA HD amplían las imágenes pequeñas a 1920 o 3840 px por interpolación, y el resultado indica la resolución real obtenida",
                     "Imágenes a PDF: 1600, 2400 o 3600 px por página. PDF a imágenes: 150, 200 o 300 ppp",
                     "Audio a M4A: 128, 192 o 320 kbps",
-                    "Reemplazan a los controles anteriores de calidad, bitrate y resolución"))))
+                    "Reemplazan a los controles anteriores de calidad, bitrate y resolución")))),
+        Entrada("0.4.2", null, "Mejorar imágenes con IA",
+            "Una sección nueva para ampliar fotos y mejorar sus detalles con una red neuronal que se ejecuta en tu teléfono.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Mejorar imágenes con IA (Real-ESRGAN): ampliación 2× y 4×, menos ruido y reconstrucción de texturas",
+                    "Comparación antes y después con barra deslizante, zoom y las dimensiones de cada versión",
+                    "Guardado de la imagen mejorada como archivo nuevo, con nombre, carpeta y formato a elección")),
+                Seccion("Mejoras", listOf(
+                    "Ampliación clásica (sin IA) como alternativa y para comparar el resultado",
+                    "El modelo de IA (unos 5 MB) se descarga solo con tu permiso: tus imágenes nunca salen del teléfono",
+                    "Progreso con tiempo restante, cancelación y avisos de memoria",
+                    "Puedes volver al original antes de guardar y nunca se sobrescribe un archivo"))))
     )
 
     private val pendientes = listOf(
@@ -207,6 +227,7 @@ class MainActivity : Activity() {
         "Convertir a MP3: Android no incluye codificador de MP3 y Nexora no tiene una biblioteca para ello.",
         "Convertir videos: requiere una biblioteca adicional (por ejemplo Media3 Transformer) que todavía no está incorporada.",
         "PDF a Word y otros documentos: no se puede conservar el formato con las herramientas actuales.",
+        "Mejorar imágenes: una imagen a la vez, hasta 1 MP en 4× y 2 MP en 2×, y procesado en el procesador del teléfono (sin GPU).",
         "Vista en cuadrícula: aún no existe.",
         "Extraer RAR y 7z: por ahora solo se extraen ZIP."
     )
@@ -269,6 +290,21 @@ class MainActivity : Activity() {
     private var convHead: TextView? = null
     private var convOverall: ProgressBar? = null
     private var pageScroll: ScrollView? = null
+    private var curPage = ""
+    private var aiFile: File? = null
+    private var aiOrig: Bitmap? = null
+    private var aiResult: Bitmap? = null
+    private var aiMethod = 0
+    private var aiScale = 1
+    private var aiInfo = ""
+    private var aiError = ""
+    private var aiName = ""
+    private var aiFmt = 0
+    private var aiDest: File? = null
+    private var aiDlPct = -1
+    private var aiDlBar: ProgressBar? = null
+    private var aiDlLabel: TextView? = null
+    @Volatile private var aiCancel = false
     private val dateFull = SimpleDateFormat("d MMM yyyy, HH:mm", Locale("es"))
     private val thumbPx: Int get() = dp(52)
     private val memCache = object : android.util.LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 10).toInt()) {
@@ -552,6 +588,7 @@ class MainActivity : Activity() {
     // ---------- páginas del menú ----------
     private fun page(title: String, content: View) {
         inViewer = true
+        curPage = title
         token++
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
@@ -568,6 +605,25 @@ class MainActivity : Activity() {
         pageScroll = sv
         col.addView(bar, lp(-1, -2))
         col.addView(sv, lp(-1, 0, 1f))
+        setContentView(withBg(col))
+    }
+
+    private fun pageFixed(title: String, content: View) {
+        inViewer = true
+        curPage = title
+        token++
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        val bar = LinearLayout(this)
+        bar.gravity = Gravity.CENTER_VERTICAL
+        bar.setPadding(dp(16), dp(14), dp(16), dp(10))
+        val back = txt("‹", 30f, TXT, true)
+        back.setPadding(dp(4), 0, dp(14), 0)
+        bar.addView(back)
+        bar.addView(txt(title, 20f, TXT, true))
+        bar.setOnClickListener { closeViewer() }
+        col.addView(bar, lp(-1, -2))
+        col.addView(content, lp(-1, 0, 1f))
         setContentView(withBg(col))
     }
 
@@ -1189,6 +1245,7 @@ class MainActivity : Activity() {
         if (one) out.add(MEntry(8, "Renombrar", false, 1, false) { rename(f0) })
         else out.add(MEntry(8, "Renombre múltiple", false, 1, false) { renameMultiSheet() })
         if (files.all { convKind(it) > 0 } && files.map { convKind(it) }.distinct().size == 1) out.add(MEntry(17, "Convertir formato", false, 1, false) { openConverter(files) })
+        if (one && convKind(f0) == 1) out.add(MEntry(18, "Mejorar imagen", false, 1, false) { openEnhancer(f0) })
         out.add(MEntry(9, "Información", false, 2, false) { infoSheet(files) })
         if (items.count { it.cat >= 0 } > selected.size) out.add(MEntry(10, "Seleccionar todo", false, 2, false) { selectAll() })
         out.add(MEntry(11, if (one) "Eliminar" else "Eliminar " + files.size + " archivos", true, 3, false) { confirmDeleteFiles(files) })
@@ -1219,6 +1276,7 @@ class MainActivity : Activity() {
         MEntry(0, "Perfil", false, 0, false) { showProfile() },
         MEntry(1, "Novedades", false, 0, hasUnseen()) { showNews() },
         MEntry(17, "Convertidor", false, 1, false) { openConverter(null) },
+        MEntry(18, "Mejorar imágenes", false, 1, false) { openEnhancer(null) },
         MEntry(2, "Personalización", false, 2, false) { showPersonalization() },
         MEntry(3, "Configuración", false, 2, false) { showSettings() }
     )
@@ -1716,7 +1774,7 @@ class MainActivity : Activity() {
         return row
     }
 
-    private fun pickFilesSheet(onDone: (List<File>) -> Unit) {
+    private fun pickFilesSheet(kindOnly: Int = 0, single: Boolean = false, onDone: (List<File>) -> Unit) {
         showSheet { d ->
             var cur: File = dir
             val chosen = LinkedHashSet<File>()
@@ -1755,13 +1813,18 @@ class MainActivity : Activity() {
                             cur = f
                             render()
                         }, lp(-1, -2).also { it.topMargin = dp(2) })
-                    } else if (convKind(f) > 0) {
+                    } else if (convKind(f) > 0 && (kindOnly == 0 || convKind(f) == kindOnly)) {
                         val sel = chosen.contains(f)
                         val r = optionRow((if (sel) "✓  " else "") + f.name + "  ·  " + fmt(f.length()), sel)
                         r.isSingleLine = true
                         r.ellipsize = TextUtils.TruncateAt.END
                         r.setOnClickListener {
-                            if (!chosen.add(f)) chosen.remove(f)
+                            if (single) {
+                                chosen.clear()
+                                chosen.add(f)
+                            } else if (!chosen.add(f)) {
+                                chosen.remove(f)
+                            }
                             render()
                         }
                         listBox.addView(r, lp(-1, -2).also { it.topMargin = dp(2) })
@@ -2309,6 +2372,575 @@ class MainActivity : Activity() {
         } finally {
             if (tmp.exists()) tmp.delete()
         }
+    }
+
+    // ---------- mejorar imágenes (IA) ----------
+    private val modelUrl = "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/real_esrgan_general_x4v3/releases/v0.64.0/real_esrgan_general_x4v3-tflite-float.zip"
+
+    private fun modelFile(): File = File(File(filesDir, "models"), "realesr-general-x4v3.tflite")
+
+    private fun modelReady(): Boolean {
+        val m = modelFile()
+        return m.exists() && m.length() > 500000L
+    }
+
+    private fun imageDims(f: File): Pair<Int, Int> {
+        val o = BitmapFactory.Options()
+        o.inJustDecodeBounds = true
+        BitmapFactory.decodeFile(f.path, o)
+        var w = o.outWidth
+        var h = o.outHeight
+        try {
+            val ori = ExifInterface(f.path).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1)
+            if (ori == 6 || ori == 8) {
+                val t = w
+                w = h
+                h = t
+            }
+        } catch (e: Exception) {
+        }
+        return Pair(w, h)
+    }
+
+    private fun fmtTime(ms: Long): String {
+        val sec = ms / 1000
+        return if (sec < 60) sec.toString() + " s" else (sec / 60).toString() + " min " + (sec % 60) + " s"
+    }
+
+    private fun flattenWhite(bm: Bitmap): Bitmap {
+        if (!bm.hasAlpha()) return bm
+        val flat = Bitmap.createBitmap(bm.width, bm.height, Bitmap.Config.ARGB_8888)
+        val cv = Canvas(flat)
+        cv.drawColor(Color.WHITE)
+        cv.drawBitmap(bm, 0f, 0f, null)
+        return flat
+    }
+
+    private fun previewOf(b: Bitmap): Bitmap {
+        val big = maxOf(b.width, b.height)
+        if (big <= 4096) return b
+        val k = 4096f / big
+        return Bitmap.createScaledBitmap(b, maxOf(1, (b.width * k).toInt()), maxOf(1, (b.height * k).toInt()), true)
+    }
+
+    private fun openEnhancer(f: File?) {
+        if (f != null) {
+            aiFile = f
+            aiResult = null
+            aiOrig = null
+            aiName = ""
+            aiDest = null
+            selected.clear()
+        }
+        showEnhance()
+    }
+
+    private fun addExplanation(b: LinearLayout) {
+        val card = cardBox()
+        card.addView(txt("Ampliar no es lo mismo que mejorar", 15f, TXT, true))
+        card.addView(txt("Ampliar (interpolación) agranda la imagen mezclando los píxeles que ya tiene: no aparece detalle nuevo.", 13f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+        card.addView(txt("Mejorar con IA usa una red neuronal entrenada para estimar texturas y bordes plausibles y reducir el ruido. El detalle que añade es una reconstrucción probable, no información recuperada del original, y puede diferir de la realidad.", 13f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+        b.addView(card, lp(-1, -2).also { it.topMargin = dp(14) })
+    }
+
+    private fun showEnhance() {
+        val y = pageScroll?.scrollY ?: 0
+        val b = body()
+        val amber = c(0xFFFBBF24)
+        if (aiError.isNotEmpty()) {
+            b.addView(txt(aiError, 13f, amber, true), lp(-1, -2).also { it.bottomMargin = dp(10) })
+            aiError = ""
+        }
+        val f = aiFile
+        if (f == null || !f.isFile) {
+            b.addView(sectionTitle("Imagen"))
+            b.addView(txt("Elige una foto para ampliarla y mejorar sus detalles. Todo se procesa en tu teléfono.", 13f, MUTE))
+            val pick = primaryButton("Elegir imagen")
+            pick.setOnClickListener {
+                pickFilesSheet(1, true) { picked ->
+                    if (picked.isNotEmpty()) openEnhancer(picked[0])
+                }
+            }
+            b.addView(pick, lp(-1, dp(50)).also { it.topMargin = dp(12) })
+            addExplanation(b)
+            page("Mejorar imágenes", b)
+            return
+        }
+        val dims = imageDims(f)
+        val w = dims.first
+        val h = dims.second
+        val scale = if (aiScale == 0) 2 else 4
+        val ia = aiMethod == 0
+        val px = w.toLong() * h
+
+        b.addView(sectionTitle("Imagen original"))
+        val pv = ImageView(this)
+        pv.scaleType = ImageView.ScaleType.FIT_CENTER
+        pv.background = rounded(alpha(Color.WHITE, 0x10), 14)
+        b.addView(pv, lp(-1, dp(190)))
+        Thread {
+            val bm = try {
+                decodeFull(f, 720)
+            } catch (e: Throwable) {
+                null
+            }
+            if (bm != null) runOnUiThread { pv.setImageBitmap(bm) }
+        }.start()
+        b.addView(txt(f.name, 14f, TXT, true), lp(-1, -2).also { it.topMargin = dp(8) })
+        b.addView(txt(w.toString() + " × " + h + " px  ·  " + fmt(f.length()), 12f, MUTE))
+        val change = ghostButton("Cambiar imagen")
+        change.setOnClickListener {
+            pickFilesSheet(1, true) { picked ->
+                if (picked.isNotEmpty()) openEnhancer(picked[0])
+            }
+        }
+        b.addView(change, lp(-1, dp(44)).also { it.topMargin = dp(8) })
+
+        b.addView(sectionTitle("Método"))
+        b.addView(chipGroup(listOf("IA (Real-ESRGAN)", "Ampliación clásica"), aiMethod) {
+            aiMethod = it
+            showEnhance()
+        })
+        b.addView(txt(if (ia) "Red neuronal Real-ESRGAN (general-x4v3, 1,2 millones de parámetros) ejecutada en tu teléfono. Reduce ruido y artefactos y reconstruye texturas plausibles. No recupera información que no existe." else "Interpolación sin IA: agranda los píxeles existentes. Es más rápida, pero no añade detalle ni reduce el ruido.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+
+        b.addView(sectionTitle("Ampliación"))
+        b.addView(chipGroup(listOf("2×", "4×"), aiScale) {
+            aiScale = it
+            showEnhance()
+        })
+        if (ia && scale == 2) b.addView(txt("2× usa el modelo de 4× y reduce el resultado a la mitad: suele quedar más limpio y usa menos memoria.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+        b.addView(txt("Resultado: " + (w * scale) + " × " + (h * scale) + " px (" + scale + "×)", 13f, TXT, true), lp(-1, -2).also { it.topMargin = dp(8) })
+        if (ia && w > 0) {
+            val tiles = ((w + 95) / 96) * ((h + 95) / 96)
+            b.addView(txt("Se procesa en unos " + tiles + " bloques de 128 px. Según tu teléfono puede tardar desde unos segundos hasta varios minutos, y usa batería.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
+        }
+
+        val maxPx = if (ia) (if (scale == 4) 1000000L else 2000000L) else 24000000L / (scale * scale)
+        var reason = ""
+        if (w <= 0) {
+            reason = "No se pudo leer esta imagen."
+        } else if (px > maxPx) {
+            reason = "Esta imagen tiene " + String.format("%.1f", px / 1000000.0) + " MP y el máximo para " + scale + "× con este método es " + String.format("%.1f", maxPx / 1000000.0) + " MP. Elige 2× o una imagen más pequeña."
+        }
+        var canGo = reason.isEmpty()
+
+        if (ia) {
+            b.addView(sectionTitle("Modelo de IA"))
+            val card = cardBox()
+            if (aiDlPct >= 0) {
+                val lbl = txt("Descargando… " + aiDlPct + " %", 13f, TXT, true)
+                val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+                bar.max = 100
+                bar.progress = aiDlPct
+                bar.progressTintList = ColorStateList.valueOf(ACC)
+                aiDlLabel = lbl
+                aiDlBar = bar
+                card.addView(lbl)
+                card.addView(bar, lp(-1, dp(6)).also { it.topMargin = dp(8) })
+                canGo = false
+            } else if (modelReady()) {
+                card.addView(txt("Modelo instalado (" + fmt(modelFile().length()) + ")", 13f, GREEN, true))
+                val del = ghostButton("Eliminar modelo")
+                del.setOnClickListener {
+                    modelFile().delete()
+                    showEnhance()
+                }
+                card.addView(del, lp(-1, dp(42)).also { it.topMargin = dp(8) })
+            } else {
+                card.addView(txt("El modelo de IA todavía no está en tu teléfono.", 13f, TXT, true))
+                card.addView(txt("Pesa unos 5 MB y se descarga una sola vez desde el servidor público de Qualcomm AI Hub (el enlace oficial de la ficha del modelo en Hugging Face). Tus imágenes nunca se envían a ningún sitio: solo se descarga el modelo.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(6) })
+                val dl = primaryButton("Descargar modelo (≈ 5 MB)")
+                dl.setOnClickListener {
+                    confirmSheet("¿Descargar el modelo de IA?", "Se descargarán unos 5 MB desde qaihub-public-assets.s3.us-west-2.amazonaws.com y necesitas conexión a internet. Licencias: BSD-3 (modelo original) y AI Model Hub License (archivo descargado).", "Descargar") { startModelDownload() }
+                }
+                card.addView(dl, lp(-1, dp(46)).also { it.topMargin = dp(10) })
+                canGo = false
+            }
+            b.addView(card, lp(-1, -2))
+        }
+
+        if (reason.isNotEmpty()) b.addView(txt(reason, 13f, amber, true), lp(-1, -2).also { it.topMargin = dp(10) })
+        val go = primaryButton("Mejorar")
+        go.isEnabled = canGo
+        go.alpha = if (canGo) 1f else 0.4f
+        go.setOnClickListener { startEnhance(f) }
+        b.addView(go, lp(-1, dp(52)).also { it.topMargin = dp(18) })
+        addExplanation(b)
+        page("Mejorar imágenes", b)
+        pageScroll?.post { pageScroll?.scrollTo(0, y) }
+    }
+
+    private fun startModelDownload() {
+        aiDlPct = 0
+        showEnhance()
+        Thread {
+            var err: String? = null
+            val zipTmp = File(cacheDir, "modelo.zip")
+            try {
+                val cn = URL(modelUrl).openConnection() as HttpURLConnection
+                cn.connectTimeout = 15000
+                cn.readTimeout = 30000
+                cn.instanceFollowRedirects = true
+                if (cn.responseCode != 200) throw Exception("el servidor respondió " + cn.responseCode)
+                val total = cn.contentLengthLong
+                cn.inputStream.use { ins ->
+                    FileOutputStream(zipTmp).use { os ->
+                        val buf = ByteArray(32768)
+                        var read = 0L
+                        var last = -1
+                        while (true) {
+                            val n = ins.read(buf)
+                            if (n < 0) break
+                            os.write(buf, 0, n)
+                            read += n
+                            if (total > 0) {
+                                val pc = (read * 100 / total).toInt()
+                                if (pc != last) {
+                                    last = pc
+                                    runOnUiThread {
+                                        aiDlPct = pc
+                                        aiDlBar?.progress = pc
+                                        aiDlLabel?.text = "Descargando… " + pc + " %"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                val md = File(filesDir, "models")
+                md.mkdirs()
+                val tmp = File(md, "descarga.tmp")
+                var found = false
+                ZipInputStream(FileInputStream(zipTmp).buffered()).use { z ->
+                    var e = z.nextEntry
+                    while (e != null) {
+                        if (!e.isDirectory && e.name.lowercase().endsWith(".tflite")) {
+                            FileOutputStream(tmp).use { os -> z.copyTo(os) }
+                            found = true
+                            break
+                        }
+                        e = z.nextEntry
+                    }
+                }
+                if (!found) throw Exception("el paquete descargado no contiene un modelo .tflite")
+                if (tmp.length() < 500000L) throw Exception("el modelo descargado está incompleto")
+                val mf = modelFile()
+                if (mf.exists()) mf.delete()
+                if (!tmp.renameTo(mf)) throw Exception("no se pudo guardar el modelo")
+            } catch (e: Throwable) {
+                err = friendlyError(e)
+            } finally {
+                zipTmp.delete()
+            }
+            runOnUiThread {
+                aiDlPct = -1
+                if (err != null) aiError = "No se pudo descargar el modelo: " + err
+                if (inViewer && curPage == "Mejorar imágenes") showEnhance()
+            }
+        }.start()
+    }
+
+    private fun runSuperRes(src: Bitmap, scale: Int, onTile: (Int, Int) -> Unit): Bitmap {
+        val mf = modelFile()
+        if (!mf.exists()) throw Exception("el modelo de IA no está instalado")
+        val mapped = FileInputStream(mf).use { it.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, mf.length()) }
+        val opts = Interpreter.Options()
+        opts.setNumThreads(minOf(4, maxOf(1, Runtime.getRuntime().availableProcessors())))
+        val interp = try {
+            Interpreter(mapped, opts)
+        } catch (e: Throwable) {
+            throw Exception("no se pudo cargar el modelo de IA: " + (e.message ?: e.javaClass.simpleName))
+        }
+        try {
+            val ti = interp.getInputTensor(0)
+            val to = interp.getOutputTensor(0)
+            if (ti.dataType() != DataType.FLOAT32 || to.dataType() != DataType.FLOAT32) throw Exception("el modelo descargado no usa números de 32 bits")
+            val si = ti.shape()
+            val so = to.shape()
+            if (si.size != 4 || so.size != 4) throw Exception("el modelo tiene una forma inesperada")
+            val nchw = si[1] == 3 && si[3] != 3
+            val inH = if (nchw) si[2] else si[1]
+            val inW = if (nchw) si[3] else si[2]
+            val outH = if (nchw) so[2] else so[1]
+            val outW = if (nchw) so[3] else so[2]
+            if (inH <= 0 || inW <= 0) throw Exception("el modelo tiene una forma inesperada")
+            val up = outH / inH
+            if (up < 2 || outH != inH * up || outW != inW * up || up % scale != 0) throw Exception("el modelo no amplía como se esperaba")
+            val ds = up / scale
+            val iw = src.width
+            val ih = src.height
+            val px = IntArray(iw * ih)
+            src.getPixels(px, 0, iw, 0, 0, iw, ih)
+            val result = Bitmap.createBitmap(iw * scale, ih * scale, Bitmap.Config.ARGB_8888)
+            val pad = if (inW >= 64) 16 else 4
+            val core = inW - 2 * pad
+            val tilesX = (iw + core - 1) / core
+            val tilesY = (ih + core - 1) / core
+            val total = tilesX * tilesY
+            val inBuf = ByteBuffer.allocateDirect(inW * inH * 3 * 4).order(java.nio.ByteOrder.nativeOrder())
+            val outBuf = ByteBuffer.allocateDirect(outW * outH * 3 * 4).order(java.nio.ByteOrder.nativeOrder())
+            val inArr = FloatArray(inW * inH * 3)
+            val outArr = FloatArray(outW * outH * 3)
+            val plane = inW * inH
+            val oplane = outW * outH
+            var range = 0
+            var done = 0
+            for (ty in 0 until tilesY) {
+                for (tx in 0 until tilesX) {
+                    if (aiCancel) throw Exception("cancelado")
+                    val cx = tx * core
+                    val cy = ty * core
+                    val cw = minOf(core, iw - cx)
+                    val ch = minOf(core, ih - cy)
+                    for (yy in 0 until inH) {
+                        val sy = (cy - pad + yy).coerceIn(0, ih - 1)
+                        for (xx in 0 until inW) {
+                            val sx = (cx - pad + xx).coerceIn(0, iw - 1)
+                            val p = px[sy * iw + sx]
+                            val r = ((p shr 16) and 255) / 255f
+                            val g = ((p shr 8) and 255) / 255f
+                            val bl = (p and 255) / 255f
+                            if (nchw) {
+                                val o = yy * inW + xx
+                                inArr[o] = r
+                                inArr[plane + o] = g
+                                inArr[2 * plane + o] = bl
+                            } else {
+                                val o = (yy * inW + xx) * 3
+                                inArr[o] = r
+                                inArr[o + 1] = g
+                                inArr[o + 2] = bl
+                            }
+                        }
+                    }
+                    inBuf.rewind()
+                    inBuf.asFloatBuffer().put(inArr)
+                    inBuf.rewind()
+                    outBuf.rewind()
+                    interp.run(inBuf, outBuf)
+                    outBuf.rewind()
+                    outBuf.asFloatBuffer().get(outArr)
+                    if (range == 0) {
+                        var mx = 0f
+                        for (v in outArr) if (v > mx) mx = v
+                        range = if (mx > 2f) 2 else 1
+                    }
+                    val mul = if (range == 2) 1f else 255f
+                    val rw = cw * scale
+                    val rh = ch * scale
+                    val block = IntArray(rw * rh)
+                    val inv = 1f / (ds * ds)
+                    for (oy in 0 until rh) {
+                        for (ox in 0 until rw) {
+                            var rs = 0f
+                            var gs = 0f
+                            var bs = 0f
+                            for (dy in 0 until ds) {
+                                val my = pad * up + oy * ds + dy
+                                for (dx in 0 until ds) {
+                                    val mx2 = pad * up + ox * ds + dx
+                                    if (nchw) {
+                                        val o = my * outW + mx2
+                                        rs += outArr[o]
+                                        gs += outArr[oplane + o]
+                                        bs += outArr[2 * oplane + o]
+                                    } else {
+                                        val o = (my * outW + mx2) * 3
+                                        rs += outArr[o]
+                                        gs += outArr[o + 1]
+                                        bs += outArr[o + 2]
+                                    }
+                                }
+                            }
+                            val ri = (rs * inv * mul + 0.5f).toInt().coerceIn(0, 255)
+                            val gi = (gs * inv * mul + 0.5f).toInt().coerceIn(0, 255)
+                            val bi = (bs * inv * mul + 0.5f).toInt().coerceIn(0, 255)
+                            block[oy * rw + ox] = Color.rgb(ri, gi, bi)
+                        }
+                    }
+                    result.setPixels(block, 0, rw, cx * scale, cy * scale, rw, rh)
+                    done++
+                    onTile(done, total)
+                }
+            }
+            return result
+        } finally {
+            interp.close()
+        }
+    }
+
+    private fun startEnhance(f: File) {
+        val scale = if (aiScale == 0) 2 else 4
+        val ia = aiMethod == 0
+        converting = true
+        aiCancel = false
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val b = body()
+        val head = txt("Preparando la imagen…", 17f, TXT, true)
+        b.addView(head)
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+        bar.max = 1000
+        bar.progressTintList = ColorStateList.valueOf(ACC)
+        b.addView(bar, lp(-1, dp(8)).also { it.topMargin = dp(12) })
+        val detail = txt("", 13f, MUTE)
+        b.addView(detail, lp(-1, -2).also { it.topMargin = dp(10) })
+        b.addView(txt(if (ia) "La IA se ejecuta en el procesador del teléfono: puede calentarse y gastar batería. Puedes cancelar cuando quieras." else "Ampliando por interpolación…", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(10) })
+        val cancel = ghostButton("Cancelar")
+        cancel.setOnClickListener {
+            aiCancel = true
+            cancel.text = "Cancelando…"
+            cancel.isEnabled = false
+        }
+        b.addView(cancel, lp(-1, dp(48)).also { it.topMargin = dp(16) })
+        page("Mejorar imágenes", b)
+        val t0 = System.currentTimeMillis()
+        Thread {
+            try {
+                val src = flattenWhite(decodeFull(f, 0))
+                val onTile: (Int, Int) -> Unit = { d, tot ->
+                    val el = System.currentTimeMillis() - t0
+                    val rem = if (d > 0) el * (tot - d) / d else 0L
+                    runOnUiThread {
+                        head.text = "Mejorando con IA: bloque " + d + " de " + tot
+                        bar.progress = d * 1000 / tot
+                        detail.text = "Tiempo restante aproximado: " + fmtTime(rem)
+                    }
+                }
+                val result: Bitmap = if (ia) runSuperRes(src, scale, onTile) else upscale(src, src.width * scale, src.height * scale)
+                val secs = fmtTime(System.currentTimeMillis() - t0)
+                aiOrig = src
+                aiResult = result
+                aiInfo = (if (ia) "IA Real-ESRGAN general-x4v3" + (if (scale == 2) " (4× del modelo reducido a 2×)" else "") else "Ampliación clásica por interpolación (sin IA)") + " · tardó " + secs
+                runOnUiThread {
+                    converting = false
+                    window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    showEnhanceResult()
+                }
+            } catch (e: Throwable) {
+                runOnUiThread {
+                    converting = false
+                    window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    if (aiCancel) toast("Procesamiento cancelado") else aiError = "No se pudo mejorar la imagen: " + friendlyError(e)
+                    showEnhance()
+                }
+            }
+        }.start()
+    }
+
+    private fun showEnhanceResult() {
+        val before = aiOrig
+        val after = aiResult
+        if (before == null || after == null || aiFile == null) {
+            showEnhance()
+            return
+        }
+        val scale = if (aiScale == 0) 2 else 4
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        val cmp = CompareView(this, before, previewOf(after))
+        col.addView(cmp, lp(-1, 0, 1f))
+        val panel = LinearLayout(this)
+        panel.orientation = LinearLayout.VERTICAL
+        panel.setPadding(dp(16), dp(10), dp(16), dp(14))
+        panel.addView(txt("Original " + before.width + "×" + before.height + "  →  Mejorada " + after.width + "×" + after.height + " px (" + scale + "×)", 13f, TXT, true))
+        panel.addView(txt(aiInfo, 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(2) })
+        panel.addView(chipGroup(listOf("Original", "Dividido", "Mejorada"), 1) {
+            cmp.setSplit(if (it == 0) 1f else if (it == 1) 0.5f else 0f)
+        }, lp(-1, -2).also { it.topMargin = dp(10) })
+        panel.addView(txt("Pellizca para ampliar, arrastra para moverte y desliza la barra para comparar.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+        val row = LinearLayout(this)
+        val back = ghostButton("Volver al original")
+        back.setOnClickListener {
+            aiResult = null
+            aiOrig = null
+            showEnhance()
+        }
+        val save = primaryButton("Guardar…")
+        save.setOnClickListener { saveEnhanced() }
+        row.addView(back, lp(0, dp(48), 1f))
+        row.addView(save, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+        panel.addView(row, lp(-1, -2).also { it.topMargin = dp(12) })
+        col.addView(panel, lp(-1, -2))
+        pageFixed("Comparar", col)
+    }
+
+    private fun saveEnhanced() {
+        val res = aiResult ?: return
+        val src = aiFile ?: return
+        showSheet { d ->
+            var name = if (aiName.isBlank()) baseOf(src) + "_mejorada" else aiName
+            var fmtI = aiFmt
+            var dest: File = aiDest ?: src.parentFile ?: dir
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt("Guardar imagen mejorada", 18f, TXT, true))
+            col.addView(label("Nombre"))
+            col.addView(field("Nombre del archivo", false, name) { name = it }, lp(-1, -2).also { it.topMargin = dp(6) })
+            col.addView(label("Formato"))
+            col.addView(chipGroup(listOf("JPG", "PNG", "WebP"), fmtI) { fmtI = it }, lp(-1, -2).also { it.topMargin = dp(6) })
+            col.addView(txt("JPG y WebP se guardan con calidad 95 %. PNG es sin pérdida y pesa más.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(6) })
+            col.addView(label("Carpeta"))
+            val pathT = txt("Almacenamiento interno" + dest.absolutePath.removePrefix(root.absolutePath), 12f, ACC2)
+            pathT.setPadding(dp(12), dp(6), dp(12), dp(6))
+            pathT.background = rounded(alpha(ACC, 0x33), 12)
+            col.addView(pathT, lp(-2, -2).also { it.topMargin = dp(6) })
+            val chg = ghostButton("Cambiar carpeta")
+            chg.setOnClickListener {
+                pickFolder("Guardar en…", "Elegir esta carpeta", dest) { picked ->
+                    dest = picked
+                    pathT.text = "Almacenamiento interno" + picked.absolutePath.removePrefix(root.absolutePath)
+                    true
+                }
+            }
+            col.addView(chg, lp(-1, dp(44)).also { it.topMargin = dp(8) })
+            col.addView(txt("El original no se toca y nunca se sobrescribe: si el nombre ya existe se agrega (1).", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+            val btns = LinearLayout(this)
+            val no = ghostButton("Cancelar")
+            no.setOnClickListener { d.dismiss() }
+            val yes = primaryButton("Guardar")
+            yes.setOnClickListener {
+                val nm = cleanName(name).ifBlank { baseOf(src) + "_mejorada" }
+                aiName = nm
+                aiFmt = fmtI
+                aiDest = dest
+                d.dismiss()
+                doSaveEnhanced(res, nm, fmtI, dest)
+            }
+            btns.addView(no, lp(0, dp(48), 1f))
+            btns.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+            col.addView(btns, lp(-1, -2).also { it.topMargin = dp(16) })
+            col
+        }
+    }
+
+    private fun doSaveEnhanced(bm: Bitmap, base: String, fmtI: Int, dest: File) {
+        toast("Guardando…")
+        Thread {
+            var out: File? = null
+            var err: String? = null
+            try {
+                if (!dest.canWrite()) throw Exception("sin permiso de escritura en la carpeta de destino")
+                val ext = if (fmtI == 0) "jpg" else if (fmtI == 1) "png" else "webp"
+                val tmp = File(dest, ".nexora_" + System.nanoTime() + ".tmp")
+                try {
+                    val cf = if (fmtI == 0) Bitmap.CompressFormat.JPEG else if (fmtI == 1) Bitmap.CompressFormat.PNG else webpFormat(false)
+                    FileOutputStream(tmp).use { os ->
+                        if (!bm.compress(cf, 95, os)) throw Exception("el sistema no pudo codificar la imagen")
+                    }
+                    out = finalizeFile(tmp, dest, base, ext)
+                } finally {
+                    if (tmp.exists()) tmp.delete()
+                }
+            } catch (e: Throwable) {
+                err = friendlyError(e)
+            }
+            runOnUiThread {
+                if (!inViewer) refresh()
+                val o = out
+                if (o != null) reportSheet("imagen guardada como " + o.name, 1, emptyList(), null)
+                else reportSheet("", 0, listOf(Pair(base, err ?: "error desconocido")), null)
+            }
+        }.start()
     }
 
     // ---------- miniaturas ----------
@@ -2866,6 +3498,7 @@ class MainActivity : Activity() {
     // ---------- visores ----------
     private fun viewer(title: String, content: View) {
         inViewer = true
+        curPage = ""
         token++
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
@@ -2883,9 +3516,12 @@ class MainActivity : Activity() {
 
     private fun closeViewer() {
         if (converting) {
-            toast("Hay una conversión en curso. Usa Cancelar para detenerla.")
+            toast("Hay un proceso en curso. Usa Cancelar para detenerlo.")
             return
         }
+        aiResult = null
+        aiOrig = null
+        curPage = ""
         token++
         showBrowser()
     }
@@ -3196,6 +3832,19 @@ private class MenuIcon(ctx: Context, val kind: Int, val col: Int) : View(ctx) {
                 back.lineTo(w * 0.32f, h * 0.84f)
                 cv.drawPath(back, p)
             }
+            18 -> {
+                fun star(cx: Float, cy: Float, r: Float) {
+                    val sp = Path()
+                    sp.moveTo(cx, cy - r)
+                    sp.quadTo(cx, cy, cx + r, cy)
+                    sp.quadTo(cx, cy, cx, cy + r)
+                    sp.quadTo(cx, cy, cx - r, cy)
+                    sp.quadTo(cx, cy, cx, cy - r)
+                    cv.drawPath(sp, p)
+                }
+                star(w * 0.42f, h * 0.58f, w * 0.34f)
+                star(w * 0.80f, h * 0.22f, w * 0.15f)
+            }
         }
     }
 }
@@ -3476,5 +4125,155 @@ private class AudioConverter(
         try { mux?.release() } catch (x: Exception) {}
         try { raf?.close() } catch (x: Exception) {}
         try { ex?.release() } catch (x: Exception) {}
+    }
+}
+
+
+private class CompareView(ctx: Context, val before: Bitmap, val after: Bitmap) : View(ctx) {
+    private var split = 0.5f
+    private var zoom = 1f
+    private var tx = 0f
+    private var ty = 0f
+    private var lastX = 0f
+    private var lastY = 0f
+    private var dragDivider = false
+    private val dens = ctx.resources.displayMetrics.density
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val pill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val mA = Matrix()
+    private val mB = Matrix()
+
+    private val scaleDet = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        override fun onScale(det: ScaleGestureDetector): Boolean {
+            val nz = (zoom * det.scaleFactor).coerceIn(1f, 12f)
+            val k = nz / zoom
+            tx = det.focusX - (det.focusX - tx) * k
+            ty = det.focusY - (det.focusY - ty) * k
+            zoom = nz
+            clampPan()
+            invalidate()
+            return true
+        }
+    })
+
+    private val tapDet = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            if (zoom > 1.01f) {
+                zoom = 1f
+                tx = 0f
+                ty = 0f
+            } else {
+                val nz = 4f
+                tx = e.x - (e.x - tx) * nz
+                ty = e.y - (e.y - ty) * nz
+                zoom = nz
+            }
+            clampPan()
+            invalidate()
+            return true
+        }
+    })
+
+    fun setSplit(f: Float) {
+        split = f
+        invalidate()
+    }
+
+    private fun fit(): Float = minOf(width.toFloat() / after.width, height.toFloat() / after.height)
+
+    private fun clampPan() {
+        if (width == 0 || height == 0) return
+        val fs = fit()
+        val fw = after.width * fs
+        val fh = after.height * fs
+        val bl = (width - fw) / 2f
+        val bt = (height - fh) / 2f
+        val cw = fw * zoom
+        val chh = fh * zoom
+        tx = if (cw <= width) (width - cw) / 2f - zoom * bl else tx.coerceIn(width - cw - zoom * bl, -zoom * bl)
+        ty = if (chh <= height) (height - chh) / 2f - zoom * bt else ty.coerceIn(height - chh - zoom * bt, -zoom * bt)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        super.onSizeChanged(w, h, ow, oh)
+        clampPan()
+    }
+
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        scaleDet.onTouchEvent(e)
+        tapDet.onTouchEvent(e)
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                parent?.requestDisallowInterceptTouchEvent(true)
+                lastX = e.x
+                lastY = e.y
+                dragDivider = Math.abs(e.x - split * width) < 28 * dens
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> dragDivider = false
+            MotionEvent.ACTION_POINTER_UP -> {
+                val i = if (e.actionIndex == 0) 1 else 0
+                lastX = e.getX(i)
+                lastY = e.getY(i)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (e.pointerCount == 1 && !scaleDet.isInProgress) {
+                    if (dragDivider) {
+                        split = (e.x / width).coerceIn(0f, 1f)
+                    } else if (zoom > 1f) {
+                        tx += e.x - lastX
+                        ty += e.y - lastY
+                        clampPan()
+                    }
+                    lastX = e.x
+                    lastY = e.y
+                    invalidate()
+                }
+            }
+        }
+        return true
+    }
+
+    override fun onDraw(cv: Canvas) {
+        val vw = width.toFloat()
+        val vh = height.toFloat()
+        val fs = fit()
+        val fw = after.width * fs
+        val fh = after.height * fs
+        mA.reset()
+        mA.postScale(fs, fs)
+        mA.postTranslate((vw - fw) / 2f, (vh - fh) / 2f)
+        mA.postScale(zoom, zoom)
+        mA.postTranslate(tx, ty)
+        mB.set(mA)
+        mB.preScale(after.width.toFloat() / before.width, after.height.toFloat() / before.height)
+        cv.drawColor(0xFF05070C.toInt())
+        cv.drawBitmap(after, mA, paint)
+        val sx = split * vw
+        cv.save()
+        cv.clipRect(0f, 0f, sx, vh)
+        cv.drawBitmap(before, mB, paint)
+        cv.restore()
+        linePaint.color = Color.WHITE
+        linePaint.strokeWidth = 2f * dens
+        cv.drawLine(sx, 0f, sx, vh, linePaint)
+        cv.drawCircle(sx, vh / 2f, 16f * dens, linePaint)
+        linePaint.color = 0xFF101828.toInt()
+        textPaint.color = linePaint.color
+        textPaint.textSize = 14f * dens
+        textPaint.textAlign = Paint.Align.CENTER
+        cv.drawText("‹›", sx, vh / 2f + 5f * dens, textPaint)
+        textPaint.textSize = 11f * dens
+        textPaint.color = Color.WHITE
+        pill.color = 0xAA000000.toInt()
+        if (sx > 70f * dens) {
+            cv.drawRoundRect(RectF(10f * dens, 10f * dens, 76f * dens, 32f * dens), 11f * dens, 11f * dens, pill)
+            cv.drawText("ANTES", 43f * dens, 25f * dens, textPaint)
+        }
+        if (vw - sx > 90f * dens) {
+            cv.drawRoundRect(RectF(vw - 90f * dens, 10f * dens, vw - 10f * dens, 32f * dens), 11f * dens, 11f * dens, pill)
+            cv.drawText("DESPUÉS", vw - 50f * dens, 25f * dens, textPaint)
+        }
     }
 }
