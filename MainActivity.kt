@@ -184,7 +184,18 @@ class MainActivity : Activity() {
                     "Convertir formato en el menú de los archivos compatibles, también para varios a la vez",
                     "Progreso y resultado de cada archivo; si uno falla, sigue con los demás",
                     "Los originales no se tocan y nunca se sobrescribe: si el nombre ya existe se agrega (1)",
-                    "Todo se procesa dentro del teléfono"))))
+                    "Todo se procesa dentro del teléfono")))),
+        Entrada("0.3.9", null, "Calidad HD y ULTRA HD en el convertidor",
+            "El convertidor ahora ofrece tres niveles de calidad que cambian el procesamiento real de cada archivo.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Niveles Predeterminada, HD y ULTRA HD en el convertidor")),
+                Seccion("Mejoras", listOf(
+                    "JPG y WebP: calidad de compresión 85, 92 o 98 % (WebP sin pérdida en ULTRA HD cuando el sistema lo permite)",
+                    "HD y ULTRA HD amplían las imágenes pequeñas a 1920 o 3840 px por interpolación, y el resultado indica la resolución real obtenida",
+                    "Imágenes a PDF: 1600, 2400 o 3600 px por página. PDF a imágenes: 150, 200 o 300 ppp",
+                    "Audio a M4A: 128, 192 o 320 kbps",
+                    "Reemplazan a los controles anteriores de calidad, bitrate y resolución"))))
     )
 
     private val pendientes = listOf(
@@ -249,13 +260,10 @@ class MainActivity : Activity() {
     private val convFiles = ArrayList<File>()
     private var convDest: File? = null
     private var convTarget = 0
-    private var convQuality = 90
+    private var convLevel = 0
     private var convBg = Color.WHITE
     private var convMerge = true
     private var convName = ""
-    private var convBitrateIdx = 1
-    private var convDpiIdx = 1
-    private var convPdfDimIdx = 1
     @Volatile private var convCancel = false
     private var converting = false
     private var convHead: TextView? = null
@@ -1641,23 +1649,42 @@ class MainActivity : Activity() {
         return row
     }
 
-    private fun qualityBar(value: Int, labelView: TextView, onChange: (Int) -> Unit): SeekBar {
-        val sb = SeekBar(this)
-        sb.min = 10
-        sb.max = 100
-        sb.progress = value
-        sb.progressTintList = ColorStateList.valueOf(ACC)
-        sb.thumbTintList = ColorStateList.valueOf(ACC2)
-        labelView.text = "Calidad: " + value + "%"
-        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(bar: SeekBar?, p: Int, fromUser: Boolean) {
-                labelView.text = "Calidad: " + p + "%"
-                onChange(p)
+    private fun levelDescription(kind: Int, target: Int, level: Int): String {
+        val lossless = Build.VERSION.SDK_INT >= 30
+        return when (kind) {
+            1 -> when (target) {
+                0 -> listOf(
+                    "JPG con calidad 85 %. Conserva la resolución original.",
+                    "JPG con calidad 92 %. Las imágenes de menos de 1920 px de lado mayor se amplían a 1920 px por interpolación (no añade detalle real).",
+                    "JPG con calidad 98 %. Las imágenes de menos de 3840 px de lado mayor se amplían a 3840 px por interpolación (no añade detalle real)."
+                )[level]
+                1 -> listOf(
+                    "PNG sin pérdida. Conserva la resolución original.",
+                    "PNG sin pérdida: la calidad no cambia. Las imágenes de menos de 1920 px de lado mayor se amplían a 1920 px por interpolación.",
+                    "PNG sin pérdida: la calidad no cambia. Las imágenes de menos de 3840 px de lado mayor se amplían a 3840 px por interpolación."
+                )[level]
+                2 -> listOf(
+                    "WebP con calidad 80 %. Conserva la resolución original.",
+                    "WebP con calidad 90 %. Las imágenes de menos de 1920 px de lado mayor se amplían a 1920 px por interpolación.",
+                    (if (lossless) "WebP sin pérdida. " else "WebP con calidad 100 % (este Android no tiene modo sin pérdida). ") + "Las imágenes de menos de 3840 px de lado mayor se amplían a 3840 px por interpolación."
+                )[level]
+                else -> listOf(
+                    "Imágenes de hasta 1600 px de lado mayor en cada página.",
+                    "Imágenes de hasta 2400 px de lado mayor en cada página. El PDF pesa más.",
+                    "Imágenes de hasta 3600 px de lado mayor en cada página. El PDF pesa bastante más."
+                )[level] + " Nunca se amplían."
             }
-            override fun onStartTrackingTouch(bar: SeekBar?) {}
-            override fun onStopTrackingTouch(bar: SeekBar?) {}
-        })
-        return sb
+            2 -> listOf(
+                "AAC a 128 kbps.",
+                "AAC a 192 kbps.",
+                "AAC a 320 kbps (en audio mono el máximo es 192 kbps)."
+            )[level] + " Conserva la frecuencia de muestreo original: subir el bitrate no mejora una grabación que ya estaba comprimida."
+            else -> listOf(
+                "Páginas a 150 ppp.",
+                "Páginas a 200 ppp.",
+                "Páginas a 300 ppp."
+            )[level] + (if (target == 1) " JPG con calidad " + listOf(85, 92, 98)[level] + " %." else " PNG sin pérdida.") + " Se vuelven a dibujar a esa resolución, así que el texto y los vectores salen nítidos."
+        }
     }
 
     private fun bgSwatches(): View {
@@ -1807,45 +1834,27 @@ class MainActivity : Activity() {
 
             val opt = LinearLayout(this)
             opt.orientation = LinearLayout.VERTICAL
-            if (kind == 1 && (convTarget == 0 || convTarget == 2)) {
-                val ql = txt("", 13f, TXT, true)
+            if (kind == 2 && convTarget == 1) {
+                opt.addView(txt("WAV sin pérdida: conserva la frecuencia original (PCM de 16 bits). No tiene niveles de calidad y el archivo pesa mucho más.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
+            } else {
                 opt.addView(label("Calidad"))
-                opt.addView(ql, lp(-2, -2).also { it.topMargin = dp(6) })
-                opt.addView(qualityBar(convQuality, ql) { convQuality = it }, lp(-1, -2))
+                opt.addView(chipGroup(listOf("Predeterminada", "HD", "ULTRA HD"), convLevel) {
+                    convLevel = it
+                    showConverter()
+                }, lp(-1, -2).also { it.topMargin = dp(6) })
+                opt.addView(txt(levelDescription(kind, convTarget, convLevel), 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
             }
             if (kind == 1 && convTarget == 0 && convFiles.any { it.extension.lowercase() != "jpg" && it.extension.lowercase() != "jpeg" }) {
                 opt.addView(label("Fondo para las zonas transparentes"))
                 opt.addView(bgSwatches(), lp(-2, -2).also { it.topMargin = dp(8) })
                 opt.addView(txt("El JPG no admite transparencia: esas zonas se rellenan con este color.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
             }
-            if (kind == 1 && convTarget == 3) {
-                if (convFiles.size > 1) {
-                    opt.addView(label("Resultado"))
-                    opt.addView(chipGroup(listOf("Un solo PDF", "Un PDF por imagen"), if (convMerge) 0 else 1) {
-                        convMerge = it == 0
-                        showConverter()
-                    }, lp(-1, -2).also { it.topMargin = dp(6) })
-                }
-                opt.addView(label("Calidad del PDF"))
-                opt.addView(chipGroup(listOf("Alta", "Media", "Baja"), convPdfDimIdx) { convPdfDimIdx = it }, lp(-1, -2).also { it.topMargin = dp(6) })
-                opt.addView(txt("Alta: 2400 px, Media: 1600 px, Baja: 1000 px del lado mayor. Más calidad genera un PDF más pesado.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
-            }
-            if (kind == 2 && convTarget == 0) {
-                opt.addView(label("Bitrate"))
-                opt.addView(chipGroup(listOf("96 kbps", "128 kbps", "192 kbps", "256 kbps"), convBitrateIdx) { convBitrateIdx = it }, lp(-1, -2).also { it.topMargin = dp(6) })
-            }
-            if (kind == 2 && convTarget == 1) {
-                opt.addView(txt("WAV sin pérdida: conserva la frecuencia original (PCM de 16 bits). El archivo resultante pesa mucho más.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
-            }
-            if (kind == 3) {
-                opt.addView(label("Resolución de las imágenes"))
-                opt.addView(chipGroup(listOf("Baja (100 dpi)", "Normal (150 dpi)", "Alta (200 dpi)"), convDpiIdx) { convDpiIdx = it }, lp(-1, -2).also { it.topMargin = dp(6) })
-                if (convTarget == 1) {
-                    val ql = txt("", 13f, TXT, true)
-                    opt.addView(label("Calidad"))
-                    opt.addView(ql, lp(-2, -2).also { it.topMargin = dp(6) })
-                    opt.addView(qualityBar(convQuality, ql) { convQuality = it }, lp(-1, -2))
-                }
+            if (kind == 1 && convTarget == 3 && convFiles.size > 1) {
+                opt.addView(label("Resultado"))
+                opt.addView(chipGroup(listOf("Un solo PDF", "Un PDF por imagen"), if (convMerge) 0 else 1) {
+                    convMerge = it == 0
+                    showConverter()
+                }, lp(-1, -2).also { it.topMargin = dp(6) })
             }
             if (opt.childCount > 0) {
                 b.addView(sectionTitle("Opciones"))
@@ -2050,6 +2059,7 @@ class MainActivity : Activity() {
             card.addView(st, lp(-1, -2).also { it.topMargin = dp(2) })
             j.statusView = st
             updateJobRow(j)
+            if (j.note.isNotEmpty()) card.addView(txt(j.note, 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
             for (o in j.outs.take(6)) {
                 val t = txt("→ " + o.name, 13f, if (o.extension.lowercase() in previewable) ACC2 else TXT)
                 t.isSingleLine = true
@@ -2139,23 +2149,56 @@ class MainActivity : Activity() {
     }
 
     @Suppress("DEPRECATION")
-    private fun webpFormat(): Bitmap.CompressFormat =
-        if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
+    private fun webpFormat(lossless: Boolean): Bitmap.CompressFormat =
+        if (Build.VERSION.SDK_INT >= 30) (if (lossless) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.WEBP_LOSSY) else Bitmap.CompressFormat.WEBP
 
-    private fun convertImage(f: File, fmtIdx: Int, quality: Int, bg: Int, out: File) {
-        val bm = decodeFull(f, 0)
-        var src = bm
+    private fun upscale(src: Bitmap, nw: Int, nh: Int): Bitmap {
+        var cur = src
+        while (cur.width * 2 <= nw && cur.height * 2 <= nh) {
+            cur = Bitmap.createScaledBitmap(cur, cur.width * 2, cur.height * 2, true)
+        }
+        return if (cur.width == nw && cur.height == nh) cur else Bitmap.createScaledBitmap(cur, nw, nh, true)
+    }
+
+    private fun tierOf(w: Int, h: Int): String {
+        val big = maxOf(w, h)
+        return if (big >= 3840) "cumple ULTRA HD (lado mayor de 3840 px o más)"
+        else if (big >= 1920) "cumple HD (lado mayor de 1920 px o más)"
+        else "menor que HD (lado mayor de " + big + " px)"
+    }
+
+    private fun convertImage(f: File, fmtIdx: Int, level: Int, bg: Int, out: File): String {
+        val orig = decodeFull(f, 0)
+        val ow = orig.width
+        val oh = orig.height
+        var bm = orig
+        val minLong = intArrayOf(0, 1920, 3840)[level]
+        val big = maxOf(ow, oh)
+        var upscaled = false
+        if (minLong > 0 && big < minLong) {
+            val k = minLong.toFloat() / big
+            bm = upscale(orig, maxOf(1, Math.round(ow * k)), maxOf(1, Math.round(oh * k)))
+            upscaled = true
+        }
         if (fmtIdx == 0 && bm.hasAlpha()) {
             val flat = Bitmap.createBitmap(bm.width, bm.height, Bitmap.Config.ARGB_8888)
             val cv = Canvas(flat)
             cv.drawColor(bg)
             cv.drawBitmap(bm, 0f, 0f, null)
-            src = flat
+            bm = flat
         }
-        val cf = if (fmtIdx == 0) Bitmap.CompressFormat.JPEG else if (fmtIdx == 1) Bitmap.CompressFormat.PNG else webpFormat()
+        val lossless = fmtIdx == 2 && level == 2 && Build.VERSION.SDK_INT >= 30
+        val q = if (fmtIdx == 0) intArrayOf(85, 92, 98)[level] else intArrayOf(80, 90, 100)[level]
+        val cf = if (fmtIdx == 0) Bitmap.CompressFormat.JPEG else if (fmtIdx == 1) Bitmap.CompressFormat.PNG else webpFormat(lossless)
+        val finalBm = bm
         FileOutputStream(out).use { os ->
-            if (!src.compress(cf, quality, os)) throw Exception("el sistema no pudo codificar la imagen")
+            if (!finalBm.compress(cf, q, os)) throw Exception("el sistema no pudo codificar la imagen")
         }
+        var note = bm.width.toString() + "×" + bm.height + " px"
+        if (upscaled) note += " (ampliada desde " + ow + "×" + oh + " por interpolación, sin añadir detalle real)"
+        note += " · " + tierOf(bm.width, bm.height)
+        note += if (fmtIdx == 1) " · PNG sin pérdida" else if (lossless) " · WebP sin pérdida" else " · calidad " + q + " %"
+        return note
     }
 
     private fun imagesToPdf(srcs: List<File>, out: File, maxDim: Int, onProg: (Float) -> Unit) {
@@ -2183,7 +2226,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun pdfToImages(f: File, dest: File, base: String, fmtIdx: Int, dpi: Int, quality: Int, outs: MutableList<File>, onProg: (Float) -> Unit) {
+    private fun pdfToImages(f: File, dest: File, base: String, fmtIdx: Int, dpi: Int, quality: Int, outs: MutableList<File>, onProg: (Float) -> Unit): String {
+        var note = ""
         val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
         try {
             val rr = PdfRenderer(pfd)
@@ -2196,10 +2240,16 @@ class MainActivity : Activity() {
                     var w = maxOf(1, (pg.width * sc).toInt())
                     var h = maxOf(1, (pg.height * sc).toInt())
                     val big = maxOf(w, h)
+                    var limited = false
                     if (big > 4000) {
                         val k = 4000f / big
                         w = maxOf(1, (w * k).toInt())
                         h = maxOf(1, (h * k).toInt())
+                        limited = true
+                    }
+                    if (i == 0) {
+                        note = dpi.toString() + " ppp · " + w + "×" + h + " px por página" + (if (limited) " (limitado a 4000 px de lado mayor)" else "") +
+                            (if (fmtIdx == 1) " · JPG calidad " + quality + " %" else " · PNG sin pérdida")
                     }
                     val bm = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                     bm.eraseColor(Color.WHITE)
@@ -2225,6 +2275,7 @@ class MainActivity : Activity() {
         } finally {
             pfd.close()
         }
+        return note
     }
 
     private fun execJob(kind: Int, j: ConvJob, dest: File, onProg: (Float) -> Unit) {
@@ -2234,22 +2285,26 @@ class MainActivity : Activity() {
         try {
             if (kind == 1) {
                 if (convTarget == 3) {
-                    imagesToPdf(j.srcs, tmp, intArrayOf(2400, 1600, 1000)[convPdfDimIdx], onProg)
+                    val dim = intArrayOf(1600, 2400, 3600)[convLevel]
+                    imagesToPdf(j.srcs, tmp, dim, onProg)
                     j.outs.add(finalizeFile(tmp, dest, j.outBase, "pdf"))
+                    j.note = "Páginas con imágenes de hasta " + dim + " px de lado mayor (nunca se amplían)"
                 } else {
                     val f = j.srcs[0]
-                    if (convTarget == 1 && f.extension.lowercase() == "png") throw Exception("ya está en PNG")
-                    convertImage(f, convTarget, convQuality, convBg, tmp)
+                    if (convTarget == 1 && f.extension.lowercase() == "png" && convLevel == 0) throw Exception("ya está en PNG")
+                    j.note = convertImage(f, convTarget, convLevel, convBg, tmp)
                     onProg(1f)
                     j.outs.add(finalizeFile(tmp, dest, j.outBase, ext))
                 }
             } else if (kind == 2) {
                 val f = j.srcs[0]
                 if (f.extension.lowercase() == ext) throw Exception("ya está en ese formato")
-                AudioConverter(f, tmp, convTarget == 0, intArrayOf(96, 128, 192, 256)[convBitrateIdx], { convCancel }, onProg).run()
+                val kbps = intArrayOf(128, 192, 320)[convLevel]
+                AudioConverter(f, tmp, convTarget == 0, kbps, { convCancel }, onProg).run()
                 j.outs.add(finalizeFile(tmp, dest, j.outBase, ext))
+                j.note = if (convTarget == 0) "AAC a " + kbps + " kbps" else "WAV sin pérdida (PCM de 16 bits)"
             } else {
-                pdfToImages(j.srcs[0], dest, j.outBase, convTarget, intArrayOf(100, 150, 200)[convDpiIdx], convQuality, j.outs, onProg)
+                j.note = pdfToImages(j.srcs[0], dest, j.outBase, convTarget, intArrayOf(150, 200, 300)[convLevel], intArrayOf(85, 92, 98)[convLevel], j.outs, onProg)
             }
         } finally {
             if (tmp.exists()) tmp.delete()
@@ -3149,6 +3204,7 @@ private class MenuIcon(ctx: Context, val kind: Int, val col: Int) : View(ctx) {
 private class ConvJob(val label: String, val srcs: List<File>, val outBase: String) {
     var status = 0
     var msg = ""
+    var note = ""
     val outs = ArrayList<File>()
     var statusView: TextView? = null
     var bar: ProgressBar? = null
@@ -3320,7 +3376,7 @@ private class AudioConverter(
         } else {
             val ef = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, rate, ch)
             ef.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            ef.setInteger(MediaFormat.KEY_BIT_RATE, bitrateK * 1000)
+            ef.setInteger(MediaFormat.KEY_BIT_RATE, (if (ch == 1) minOf(bitrateK, 192) else bitrateK) * 1000)
             ef.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 65536)
             val en = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
             enc = en
