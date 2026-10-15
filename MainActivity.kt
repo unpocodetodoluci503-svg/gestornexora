@@ -74,6 +74,16 @@ private class Item(val f: File, val size: Long, val mod: Long, val cat: Int) {
     val ext: String = f.extension.lowercase()
 }
 
+private class DupGroup(val files: List<File>, val size: Long)
+private class FolderStat(val dir: File, val files: Int, val bytes: Long, val direct: Int)
+private class Sugerencia(val icon: String, val titulo: String, val detalle: String, val accion: String, val hacer: () -> Unit)
+private class CleanScan(
+    val rootPath: String, val time: Long, val files: Int, val bytes: Long, val complete: Boolean, val note: String?, val skipped: Int,
+    val dups: List<DupGroup>, val big: List<Item>, val folders: List<FolderStat>, val crowded: List<FolderStat>,
+    val similar: List<List<File>>, val generic: Array<HashMap<String, ArrayList<File>>>, val mediaByDir: Array<HashMap<String, Int>>,
+    val docClash: List<List<File>>, val docMixed: List<Pair<File, Int>>
+)
+
 private data class Seccion(val titulo: String, val puntos: List<String>)
 private data class Entrada(val version: String, val fecha: String?, val titulo: String, val resumen: String, val secciones: List<Seccion>)
 private data class Fondo(val nombre: String, val top: Int, val bottom: Int, val card: Int)
@@ -245,7 +255,20 @@ class MainActivity : Activity() {
                     "Selector de almacenamiento para cambiar entre la memoria interna, la tarjeta SD y las memorias USB conectadas",
                     "Aviso claro en las carpetas que Android protege (Android/data y Android/obb) en vez de mostrarlas vacías")),
                 Seccion("Mejoras", listOf(
-                    "Si quitas la tarjeta SD o la memoria USB mientras la usabas, Nexora vuelve sola a la memoria interna"))))
+                    "Si quitas la tarjeta SD o la memoria USB mientras la usabas, Nexora vuelve sola a la memoria interna")))),
+        Entrada("0.5.1", null, "Limpieza inteligente y accesos rápidos",
+            "Convertir y Limpiar quedan a un toque, el orden de tus archivos ya no se pierde y Nexora te ayuda a encontrar duplicados y espacio ocupado.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Botón Convertir en la parte superior: abre directamente el convertidor",
+                    "Limpiar: análisis del almacenamiento con informe, indicador de progreso y opción de cancelar",
+                    "Duplicados exactos confirmados por contenido, con el espacio recuperable y eliminación solo con tu confirmación",
+                    "Archivos grandes por tipo y carpetas que más ocupan, con acceso directo a su ubicación",
+                    "Recomendaciones según el tipo de archivo y posibles fotos similares, marcadas como sin confirmar")),
+                Seccion("Mejoras visuales", listOf(
+                    "Convertir y Limpiar ocupan el lugar donde estaba «Almacenamiento interno»; la ruta de la carpeta sigue visible debajo")),
+                Seccion("Correcciones", listOf(
+                    "El orden elegido se guarda al instante y se conserva al pasar la aplicación a segundo plano"))))
     )
 
     private val pendientes = listOf(
@@ -260,6 +283,8 @@ class MainActivity : Activity() {
         "Mejorar imágenes: una imagen a la vez; entrada de hasta 1 MP en 4× y 2 MP en 2× (las fotos más grandes se reducen antes de mejorarlas); se procesa en el procesador del teléfono, sin GPU.",
         "Vista en cuadrícula: aún no existe.",
         "Extraer RAR y 7z: por ahora solo se extraen ZIP.",
+        "Limpiar: el análisis se guarda solo mientras la app está abierta y se cancela si sales de la pantalla.",
+        "Posibles fotos similares: solo se comparan por nombre base dentro de la misma carpeta, no por el contenido de la imagen.",
         "Android/data y Android/obb: desde Android 11 el sistema bloquea su lectura a todas las apps normales; abrirlas requeriría un método avanzado (por ejemplo Shizuku)."
     )
 
@@ -301,6 +326,7 @@ class MainActivity : Activity() {
     private val GREEN = c(0xFF34D399)
     private var fontIdx = 0
     private var sortIdx = 0
+    private var sortReady = false
     private var foldersFirst = true
     private var catIdx = 0
     private var bgBitmap: Bitmap? = null
@@ -412,8 +438,11 @@ class MainActivity : Activity() {
         BG2 = f.bottom
         CARD = f.card
         fontIdx = prefs.getInt("font", 0).coerceIn(0, FUENTES.size - 1)
-        sortIdx = prefs.getInt("sort", 0).coerceIn(0, SORTS.size - 1)
-        foldersFirst = prefs.getBoolean("folders", true)
+        if (!sortReady) {
+            sortIdx = prefs.getInt("sort", 0).coerceIn(0, SORTS.size - 1)
+            foldersFirst = prefs.getBoolean("folders", true)
+            sortReady = true
+        }
         val bf = File(filesDir, "fondo.jpg")
         bgBitmap = if (prefs.getBoolean("bgCustom", false) && bf.exists()) BitmapFactory.decodeFile(bf.path) else null
         window.statusBarColor = if (bgBitmap != null) c(0xFF05070C) else BG1
@@ -942,6 +971,8 @@ class MainActivity : Activity() {
     // ---------- explorador ----------
     private fun showBrowser() {
         inViewer = false
+        cleanNav.clear()
+        cleanProgTxt = null
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
 
@@ -957,10 +988,15 @@ class MainActivity : Activity() {
         dots.setOnClickListener { openMenu(dots, null, dotsEntries()) }
         top.addView(dots, lp(dp(44), dp(44)))
         head.addView(top, lp(-1, -2))
-        pathView = txt("", 12f, ACC2)
-        pathView.setPadding(dp(12), dp(6), dp(12), dp(6))
-        pathView.background = rounded(alpha(ACC, 0x33), 12)
-        head.addView(pathView, lp(-2, -2).also { it.topMargin = dp(8) })
+        val qa = LinearLayout(this)
+        qa.addView(quickBtn("⇄", "Convertir") { openConverter(null) }, lp(0, dp(44), 1f))
+        qa.addView(quickBtn("🧹", "Limpiar") { openClean() }, lp(0, dp(44), 1f).also { it.leftMargin = dp(10) })
+        head.addView(qa, lp(-1, -2).also { it.topMargin = dp(10) })
+        pathView = txt("", 12f, MUTE)
+        pathView.setPadding(dp(4), dp(8), dp(4), 0)
+        pathView.isSingleLine = true
+        pathView.ellipsize = TextUtils.TruncateAt.START
+        head.addView(pathView, lp(-1, -2))
 
         val hs = HorizontalScrollView(this)
         hs.isHorizontalScrollBarEnabled = false
@@ -1105,7 +1141,7 @@ class MainActivity : Activity() {
             }
         }
         items = sortItems(all.filter { x -> x.cat < 0 || catIdx == 0 || x.cat == catIdx })
-        pathView.text = rootName + dir.absolutePath.removePrefix(root.absolutePath)
+        pathView.text = dir.absolutePath.removePrefix(root.absolutePath).ifEmpty { "/" }
         emptyView.text = if (raw == null) restrictedMsg() else if (all.isEmpty()) "Esta carpeta está vacía" else "No hay archivos de esta categoría aquí"
         list.adapter = RowAdapter()
         buildTools()
@@ -1152,8 +1188,8 @@ class MainActivity : Activity() {
             for (i in SORTS.indices) {
                 val r = optionRow(SORTS[i], i == sortIdx)
                 r.setOnClickListener {
-                    prefs.edit().putInt("sort", i).apply()
                     sortIdx = i
+                    saveSort()
                     d.dismiss()
                     refresh()
                 }
@@ -1162,7 +1198,7 @@ class MainActivity : Activity() {
             val tg = optionRow((if (foldersFirst) "✓  " else "○  ") + "Mostrar carpetas primero", false)
             tg.setOnClickListener {
                 foldersFirst = !foldersFirst
-                prefs.edit().putBoolean("folders", foldersFirst).apply()
+                saveSort()
                 d.dismiss()
                 refresh()
             }
@@ -3841,6 +3877,11 @@ class MainActivity : Activity() {
         aiOrig = null
         curPage = ""
         token++
+        if (cleanNav.isNotEmpty()) {
+            val back = cleanNav.removeAt(cleanNav.size - 1)
+            back()
+            return
+        }
         showBrowser()
     }
 
@@ -3913,6 +3954,809 @@ class MainActivity : Activity() {
                 runOnUiThread { toast("No se pudo abrir el PDF") }
             }
         }.start()
+    }
+
+    // ---------- Limpieza inteligente ----------
+    private val cleanNav = ArrayList<() -> Unit>()
+    private val cleanCache = HashMap<String, CleanScan>()
+    private val hashCache = HashMap<String, String>()
+    private val dupSel = HashSet<String>()
+    private var cleanScroll: ScrollView? = null
+    private var cleanProgTxt: TextView? = null
+    private var cleanMsg = ""
+    @Volatile private var cleanRunning = false
+    @Volatile private var cleanCancel = false
+    @Volatile private var cleanMy = 0
+
+    private fun cleanStopped(): Boolean = cleanCancel || token != cleanMy
+
+    private fun fmtS(b: Long): String =
+        if (b >= 1073741824L) String.format("%.2f GB", b / 1073741824.0) else fmt(b)
+
+    private fun relPath(f: File): String {
+        val r = f.absolutePath.removePrefix(root.absolutePath)
+        return if (r.isEmpty()) "/" else r
+    }
+
+    private fun previewable(f: File): Boolean =
+        f.extension.lowercase() in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "mp4", "mkv", "webm", "3gp", "mov", "pdf")
+
+    private fun isGenericName(name: String): Boolean {
+        val s = name.substringBeforeLast('.').lowercase()
+        if (Regex("^(img|dsc|dscn|dscf|pxl|vid|mov|mvi|aud|ptt|audio|recording|record|rec|photo|image|video|screenshot|captura|track|scan)[ _-]?[0-9].*").matches(s)) return true
+        if (Regex("^whatsapp (image|video|audio).*").matches(s)) return true
+        return Regex("^[0-9a-f-]{12,}$").matches(s)
+    }
+
+    private fun stemOf(name: String): String {
+        var s = name.substringBeforeLast('.').lowercase()
+        s = s.replace(Regex("\\s*\\(\\d+\\)$"), "")
+        s = s.replace(Regex("[-_ ]*(copia|copy)( ?\\d+)?$"), "")
+        return s
+    }
+
+    private fun altName(f: File): String {
+        val ext = f.extension
+        val par = f.parentFile?.name ?: "copia"
+        return f.nameWithoutExtension + " (" + par + ")" + (if (ext.isEmpty()) "" else "." + ext)
+    }
+
+    private fun hashFile(f: File, partial: Boolean): String? {
+        try {
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            val buf = ByteArray(65536)
+            FileInputStream(f).use { ins ->
+                if (partial) {
+                    val n = ins.read(buf)
+                    if (n > 0) md.update(buf, 0, n)
+                } else {
+                    while (true) {
+                        if (cleanStopped()) return null
+                        val n = ins.read(buf)
+                        if (n <= 0) break
+                        md.update(buf, 0, n)
+                    }
+                }
+            }
+            val sb = StringBuilder()
+            for (x in md.digest()) sb.append(String.format("%02x", x))
+            return sb.toString()
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun hashOf(f: File, size: Long, partial: Boolean): String? {
+        val key = f.absolutePath + "|" + size + "|" + f.lastModified() + (if (partial) "|p" else "|f")
+        val c = hashCache[key]
+        if (c != null) return c
+        val h = hashFile(f, partial) ?: return null
+        if (hashCache.size > 60000) hashCache.clear()
+        hashCache[key] = h
+        return h
+    }
+
+    private fun runCleanScan(rootDir: File): CleanScan? {
+        val rootPath = rootDir.absolutePath
+        var nFiles = 0
+        var nBytes = 0L
+        var skipped = 0
+        var note: String? = null
+        var lastUi = 0L
+        val maxFiles = 300000
+        val bySize = HashMap<Long, ArrayList<File>>()
+        val dirStat = HashMap<String, LongArray>()
+        val heap = java.util.PriorityQueue<Item>(401, Comparator<Item> { a, b -> a.size.compareTo(b.size) })
+        val generic = Array(4) { HashMap<String, ArrayList<File>>() }
+        val mediaByDir = Array(4) { HashMap<String, Int>() }
+        val docNames = HashMap<String, ArrayList<File>>()
+        val docExt = HashMap<String, HashSet<String>>()
+        val docCount = HashMap<String, Int>()
+        val imgs = ArrayList<File>()
+        val stack = ArrayList<File>()
+        stack.add(rootDir)
+        while (stack.isNotEmpty()) {
+            if (cleanStopped()) return null
+            val d = stack.removeAt(stack.size - 1)
+            val dPath = d.absolutePath
+            val kids = d.listFiles() ?: continue
+            var cnt = 0L
+            var byt = 0L
+            for (f in kids) {
+                if (f.isDirectory) {
+                    val n = f.name
+                    if (dPath == rootPath && n == "Android") continue
+                    if (n == ".thumbnails") continue
+                    if (java.nio.file.Files.isSymbolicLink(f.toPath())) continue
+                    stack.add(f)
+                    continue
+                }
+                val len = f.length()
+                nFiles++
+                nBytes += len
+                cnt++
+                byt += len
+                val cat = catOf(f)
+                if (len >= 1024L) bySize.getOrPut(len) { ArrayList() }.add(f)
+                if (heap.size < 400 || len > heap.peek().size) {
+                    heap.add(Item(f, len, f.lastModified(), cat))
+                    if (heap.size > 400) heap.poll()
+                }
+                if (cat in 1..3) {
+                    mediaByDir[cat][dPath] = (mediaByDir[cat][dPath] ?: 0) + 1
+                    if (isGenericName(f.name)) generic[cat].getOrPut(dPath) { ArrayList() }.add(f)
+                }
+                if (cat == 1) {
+                    val e = f.extension.lowercase()
+                    if (e == "jpg" || e == "jpeg" || e == "png" || e == "webp") imgs.add(f)
+                }
+                if (cat == 4) {
+                    docNames.getOrPut(f.name.lowercase()) { ArrayList() }.add(f)
+                    docCount[dPath] = (docCount[dPath] ?: 0) + 1
+                    docExt.getOrPut(dPath) { HashSet() }.add(f.extension.lowercase())
+                }
+                if (nFiles >= maxFiles) {
+                    note = "Se alcanzó el límite de 300.000 archivos analizados."
+                    break
+                }
+            }
+            dirStat[dPath] = longArrayOf(cnt, byt)
+            if (note != null) break
+            val now = System.currentTimeMillis()
+            if (now - lastUi > 250) {
+                lastUi = now
+                val msg = "Explorando…  " + nFiles + " archivos\n" + d.name
+                runOnUiThread { cleanMsg = msg; cleanProgTxt?.text = msg }
+            }
+        }
+
+        var totalCand = 0
+        for (l in bySize.values) if (l.size > 1) totalCand += l.size
+        var done = 0
+        val groups = ArrayList<DupGroup>()
+        for ((size, list) in bySize) {
+            if (list.size < 2) continue
+            val byPart = HashMap<String, ArrayList<File>>()
+            for (f in list) {
+                if (cleanStopped()) return null
+                done++
+                val now = System.currentTimeMillis()
+                if (now - lastUi > 250) {
+                    lastUi = now
+                    val msg = "Comparando contenido…  " + done + " de " + totalCand + "\n" + f.name
+                    runOnUiThread { cleanMsg = msg; cleanProgTxt?.text = msg }
+                }
+                val h = hashOf(f, size, size > 65536L)
+                if (h == null) {
+                    skipped++
+                    continue
+                }
+                byPart.getOrPut(h) { ArrayList() }.add(f)
+            }
+            for (pl in byPart.values) {
+                if (pl.size < 2) continue
+                if (size <= 65536L) {
+                    groups.add(DupGroup(pl.sortedBy { it.lastModified() }, size))
+                    continue
+                }
+                val byFull = HashMap<String, ArrayList<File>>()
+                for (f in pl) {
+                    if (cleanStopped()) return null
+                    val h = hashOf(f, size, false)
+                    if (h == null) {
+                        skipped++
+                        continue
+                    }
+                    byFull.getOrPut(h) { ArrayList() }.add(f)
+                }
+                for (fl in byFull.values) {
+                    if (fl.size >= 2) groups.add(DupGroup(fl.sortedBy { it.lastModified() }, size))
+                }
+            }
+        }
+        groups.sortByDescending { it.size * (it.files.size - 1) }
+
+        val dupPaths = HashMap<String, Int>()
+        for ((i, g) in groups.withIndex()) for (f in g.files) dupPaths[f.absolutePath] = i
+        val byStem = HashMap<String, ArrayList<File>>()
+        for (f in imgs) byStem.getOrPut((f.parent ?: "") + "/" + stemOf(f.name)) { ArrayList() }.add(f)
+        val similar = ArrayList<List<File>>()
+        for (l in byStem.values) {
+            if (l.size < 2) continue
+            val gi = l.map { dupPaths[it.absolutePath] ?: -1 }
+            if (gi[0] >= 0 && gi.all { it == gi[0] }) continue
+            similar.add(l.sortedBy { it.name.lowercase() })
+        }
+        similar.sortByDescending { it.size }
+
+        val rec = HashMap<String, LongArray>()
+        for ((p, a) in dirStat) {
+            var cur: String? = p
+            while (cur != null) {
+                val r = rec.getOrPut(cur) { LongArray(2) }
+                r[0] += a[0]
+                r[1] += a[1]
+                if (cur == rootPath) break
+                cur = File(cur).parent
+                if (cur != null && cur.length < rootPath.length) break
+            }
+        }
+        val folders = rec.entries
+            .filter { it.key != rootPath && it.value[1] > 0L }
+            .sortedByDescending { it.value[1] }
+            .take(40)
+            .map { FolderStat(File(it.key), it.value[0].toInt(), it.value[1], (dirStat[it.key]?.get(0) ?: 0L).toInt()) }
+        val crowded = dirStat.entries
+            .filter { it.value[0] >= 100L }
+            .sortedByDescending { it.value[0] }
+            .take(30)
+            .map { FolderStat(File(it.key), it.value[0].toInt(), it.value[1], it.value[0].toInt()) }
+        val docClash = docNames.values.filter { it.size >= 2 }.sortedByDescending { it.size }.take(100)
+        val docMixed = docCount.entries
+            .filter { it.value >= 30 && (docExt[it.key]?.size ?: 0) >= 2 }
+            .sortedByDescending { it.value }
+            .take(10)
+            .map { Pair(File(it.key), it.value) }
+        val bigList = heap.toList().sortedByDescending { it.size }
+        return CleanScan(rootPath, System.currentTimeMillis(), nFiles, nBytes, note == null, note, skipped,
+            groups, bigList, folders, crowded, similar.take(100), generic, mediaByDir, docClash, docMixed)
+    }
+
+    private fun liveDups(sc: CleanScan): List<DupGroup> {
+        val out = ArrayList<DupGroup>()
+        for (g in sc.dups) {
+            val l = g.files.filter { it.exists() }
+            if (l.size >= 2) out.add(DupGroup(l, g.size))
+        }
+        return out
+    }
+
+    private fun openClean() {
+        cleanNav.clear()
+        showClean()
+    }
+
+    private fun cleanGo(from: () -> Unit, sub: () -> Unit) {
+        cleanNav.add(from)
+        sub()
+    }
+
+    private fun goToFolder(target: File) {
+        cleanNav.clear()
+        curPage = ""
+        token++
+        val all = listOf("Almacenamiento interno" to Environment.getExternalStorageDirectory()) + extraVolumes()
+        val v = all.firstOrNull { target.absolutePath.startsWith(it.second.absolutePath) }
+        if (v != null) {
+            root = v.second
+            rootName = v.first
+        }
+        dir = target
+        catIdx = 0
+        showBrowser()
+    }
+
+    private fun renameInFolder(folder: File, files: List<File>) {
+        val ok = files.filter { it.isFile && it.exists() }
+        if (ok.size < 2) {
+            toast("Ya no quedan suficientes archivos. Actualiza el análisis.")
+            return
+        }
+        goToFolder(folder)
+        selected.clear()
+        selected.addAll(ok)
+        refreshSel()
+        renameMultiSheet()
+    }
+
+    private fun navRow(icon: String, title: String, sub: String, onClick: () -> Unit): View {
+        val row = LinearLayout(this)
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(16), dp(14), dp(16), dp(14))
+        row.background = rounded(alpha(CARD, 0xE6), 18)
+        row.addView(txt(icon, 22f, TXT), lp(dp(36), -2))
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.addView(txt(title, 16f, TXT, true))
+        col.addView(txt(sub, 12f, MUTE))
+        row.addView(col, lp(0, -2, 1f))
+        row.addView(txt("›", 24f, MUTE, true))
+        row.setOnClickListener { onClick() }
+        return row
+    }
+
+    private fun resultRow(title: String, sub: String, onClick: () -> Unit): View {
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.setPadding(dp(14), dp(10), dp(14), dp(10))
+        col.background = rounded(alpha(CARD, 0xE6), 14)
+        val t = txt(title, 14f, TXT, true)
+        t.isSingleLine = true
+        t.ellipsize = TextUtils.TruncateAt.MIDDLE
+        col.addView(t)
+        col.addView(txt(sub, 12f, MUTE))
+        col.setOnClickListener { onClick() }
+        return col
+    }
+
+    private fun cleanChips(count: (Int) -> Int, current: Int, onPick: (Int) -> Unit): View {
+        val hs = HorizontalScrollView(this)
+        hs.isHorizontalScrollBarEnabled = false
+        val row = LinearLayout(this)
+        for (i in CATS.indices) {
+            val n = count(i)
+            if (n == 0 && i != current) continue
+            row.addView(chip(CATS[i] + " " + n, i == current) { onPick(i) }, lp(-2, -2).also { it.rightMargin = dp(8) })
+        }
+        hs.addView(row)
+        return hs
+    }
+
+    private fun cleanFileSheet(f: File, back: () -> Unit, extra: Pair<String, () -> Unit>?) {
+        showSheet { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt(f.name, 17f, TXT, true))
+            val info = relPath(f.parentFile ?: f) + "\n" + fmtS(f.length()) + " · " + CATS[catOf(f)] + " · " + dateFmt.format(Date(f.lastModified()))
+            col.addView(txt(info, 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(4); it.bottomMargin = dp(8) })
+            if (previewable(f)) {
+                val r = optionRow("Ver archivo", false)
+                r.setOnClickListener {
+                    d.dismiss()
+                    cleanNav.add(back)
+                    tap(f)
+                }
+                col.addView(r, lp(-1, -2))
+            }
+            val loc = optionRow("Abrir ubicación", false)
+            loc.setOnClickListener {
+                d.dismiss()
+                goToFolder(f.parentFile ?: f)
+            }
+            col.addView(loc, lp(-1, -2))
+            if (extra != null) {
+                val x = optionRow(extra.first, false)
+                x.setOnClickListener {
+                    d.dismiss()
+                    extra.second()
+                }
+                col.addView(x, lp(-1, -2))
+            }
+            col
+        }
+    }
+
+    private fun showClean() {
+        val sc = cleanCache[root.absolutePath]
+        val b = body()
+        val intro = cardBox()
+        intro.addView(txt("Limpieza inteligente", 18f, TXT, true))
+        intro.addView(txt("Analiza «" + rootName + "» y te sugiere cómo ordenar tus archivos. Nexora nunca borra ni mueve nada sin que tú lo pidas.", 13f, MUTE), lp(-1, -2).also { it.topMargin = dp(6) })
+        b.addView(intro, lp(-1, -2))
+        cleanProgTxt = null
+        if (cleanRunning) {
+            val pc = cardBox()
+            val pb = ProgressBar(this)
+            pb.isIndeterminate = true
+            pb.indeterminateDrawable?.setColorFilter(ACC2, android.graphics.PorterDuff.Mode.SRC_IN)
+            pc.addView(pb, lp(dp(36), dp(36)))
+            val t = txt(if (cleanMsg.isEmpty()) "Preparando análisis…" else cleanMsg, 13f, TXT)
+            cleanProgTxt = t
+            pc.addView(t, lp(-1, -2).also { it.topMargin = dp(8) })
+            val cancel = ghostButton("Cancelar análisis")
+            cancel.setOnClickListener {
+                cleanCancel = true
+                toast("Cancelando…")
+            }
+            pc.addView(cancel, lp(-1, dp(46)).also { it.topMargin = dp(12) })
+            pc.addView(txt("Si sales de esta pantalla, el análisis se cancela.", 11f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+            b.addView(pc, lp(-1, -2).also { it.topMargin = dp(12) })
+        } else {
+            val go = primaryButton(if (sc == null) "Analizar" else "Actualizar análisis")
+            go.setOnClickListener { startClean() }
+            b.addView(go, lp(-1, dp(52)).also { it.topMargin = dp(12) })
+        }
+        if (sc == null && !cleanRunning) {
+            b.addView(txt("Todavía no hay un análisis de este almacenamiento. Pulsa Analizar para buscar duplicados, archivos grandes y carpetas desordenadas. Puede tardar si tienes muchos archivos.", 13f, MUTE), lp(-1, -2).also { it.topMargin = dp(14) })
+        }
+        if (sc != null) {
+            val dups = liveDups(sc)
+            var copies = 0
+            var rec = 0L
+            for (g in dups) {
+                copies += g.files.size - 1
+                rec += g.size * (g.files.size - 1)
+            }
+            val huge = sc.big.count { it.size >= 104857600L && it.f.exists() }
+            val from: () -> Unit = { showClean() }
+            val sugs = buildSuggestions(sc) { showSuggestions() }
+            val rc = cardBox()
+            rc.addView(txt("Informe de limpieza", 17f, TXT, true))
+            val when0 = java.text.SimpleDateFormat("d MMM yyyy, HH:mm", Locale("es")).format(Date(sc.time))
+            rc.addView(txt("Análisis del " + when0, 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(2); it.bottomMargin = dp(8) })
+            if (!sc.complete) {
+                rc.addView(txt("⚠ Análisis incompleto: " + (sc.note ?: "no se terminó de recorrer todo."), 13f, c(0xFFFBBF24)), lp(-1, -2).also { it.bottomMargin = dp(8) })
+            }
+            val lines = ArrayList<String>()
+            lines.add("✓ Archivos analizados: " + sc.files + " (" + fmtS(sc.bytes) + ")")
+            lines.add("✓ Duplicados exactos: " + dups.size + " grupos, " + copies + " copias redundantes")
+            lines.add("✓ Espacio recuperable: " + fmtS(rec) + " (si conservas una copia de cada grupo)")
+            lines.add("✓ Archivos de más de 100 MB: " + huge)
+            lines.add("✓ Carpetas con 100 archivos o más sueltos: " + sc.crowded.size)
+            lines.add("≈ Posibles fotos similares: " + sc.similar.size + " grupos (sin confirmar)")
+            lines.add("≈ Recomendaciones disponibles: " + sugs.size)
+            for (ln in lines) rc.addView(txt(ln, 13f, TXT), lp(-1, -2).also { it.topMargin = dp(4) })
+            if (sc.skipped > 0) rc.addView(txt("No se pudieron leer " + sc.skipped + " archivos al comparar; podrían tener duplicados no detectados.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+            rc.addView(txt("✓ dato confirmado   ≈ estimación\nNo se analizan Android/data ni Android/obb (Android las protege). Al buscar duplicados se ignoran los archivos de menos de 1 KB. El análisis se guarda solo mientras la app está abierta.", 11f, MUTE), lp(-1, -2).also { it.topMargin = dp(10) })
+            b.addView(rc, lp(-1, -2).also { it.topMargin = dp(14) })
+
+            b.addView(sectionTitle("Revisar"))
+            b.addView(navRow("📑", "Duplicados", dups.size.toString() + " grupos · " + fmtS(rec) + " recuperables") { cleanGo(from) { showDupes(0, false) } }, lp(-1, -2))
+            b.addView(navRow("📦", "Archivos grandes", huge.toString() + " de más de 100 MB") { cleanGo(from) { showBig(0) } }, lp(-1, -2).also { it.topMargin = dp(10) })
+            b.addView(navRow("📁", "Carpetas", sc.folders.size.toString() + " que más ocupan · " + sc.crowded.size + " muy llenas") { cleanGo(from) { showFolders() } }, lp(-1, -2).also { it.topMargin = dp(10) })
+            b.addView(navRow("🔍", "Posibles similares", sc.similar.size.toString() + " grupos sin confirmar") { cleanGo(from) { showSimilar() } }, lp(-1, -2).also { it.topMargin = dp(10) })
+            b.addView(navRow("💡", "Recomendaciones", sugs.size.toString() + " según tus archivos") { cleanGo(from) { showSuggestions() } }, lp(-1, -2).also { it.topMargin = dp(10) })
+        }
+        page("Limpiar", b)
+    }
+
+    private fun startClean() {
+        if (cleanRunning) return
+        cleanRunning = true
+        cleanCancel = false
+        cleanMsg = "Preparando análisis…"
+        showClean()
+        val my = token
+        cleanMy = my
+        val rootDir = root
+        Thread {
+            var res: CleanScan? = null
+            var err: String? = null
+            try {
+                res = runCleanScan(rootDir)
+            } catch (e: Throwable) {
+                err = "El análisis se detuvo por un error: " + (e.message ?: "desconocido")
+            }
+            val out = res
+            val er = err
+            runOnUiThread {
+                cleanRunning = false
+                cleanProgTxt = null
+                if (out != null) cleanCache[rootDir.absolutePath] = out
+                if (er != null) toast(er) else if (out == null && token == my) toast("Análisis cancelado")
+                if (inViewer && curPage == "Limpiar") showClean()
+            }
+        }.start()
+    }
+
+    private fun showDupes(cat: Int, keep: Boolean) {
+        val sc = cleanCache[root.absolutePath]
+        if (sc == null) {
+            showClean()
+            return
+        }
+        val y = if (keep) (cleanScroll?.scrollY ?: 0) else 0
+        val all = liveDups(sc)
+        val groups = all.filter { cat == 0 || catOf(it.files[0]) == cat }
+        val b = body()
+        b.addView(cleanChips({ i -> if (i == 0) all.size else all.count { catOf(it.files[0]) == i } }, cat) { i -> showDupes(i, false) }, lp(-1, -2))
+        b.addView(txt("Estos archivos coinciden en tamaño y en todo su contenido (comparado con SHA-256). Revisa cada uno antes de decidir: no se borra nada sin tu confirmación.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(10) })
+        var rec = 0L
+        for (g in groups) rec += g.size * (g.files.size - 1)
+        b.addView(txt("Espacio recuperable en esta lista: " + fmtS(rec), 13f, ACC2, true), lp(-1, -2).also { it.topMargin = dp(8) })
+        if (groups.isEmpty()) b.addView(txt("No hay duplicados confirmados en esta categoría.", 14f, MUTE), lp(-1, -2).also { it.topMargin = dp(16) })
+        for (g in groups.take(150)) {
+            val card = cardBox()
+            card.addView(txt(g.files.size.toString() + " copias idénticas · " + fmtS(g.size) + " cada una", 15f, TXT, true))
+            card.addView(txt("Recuperable: " + fmtS(g.size * (g.files.size - 1)) + " · " + CATS[catOf(g.files[0])], 12f, ACC2))
+            for (f in g.files) {
+                val on = dupSel.contains(f.absolutePath)
+                val row = LinearLayout(this)
+                row.gravity = Gravity.CENTER_VERTICAL
+                val chk = txt(if (on) "☑" else "☐", 24f, if (on) ACC2 else MUTE, true)
+                chk.setPadding(dp(4), dp(10), dp(14), dp(10))
+                chk.setOnClickListener {
+                    if (!dupSel.add(f.absolutePath)) dupSel.remove(f.absolutePath)
+                    showDupes(cat, true)
+                }
+                row.addView(chk)
+                val col = LinearLayout(this)
+                col.orientation = LinearLayout.VERTICAL
+                val n = txt(f.name, 14f, TXT, true)
+                n.isSingleLine = true
+                n.ellipsize = TextUtils.TruncateAt.MIDDLE
+                val s = txt(relPath(f.parentFile ?: f) + " · " + fmtS(f.length()), 11f, MUTE)
+                s.isSingleLine = true
+                s.ellipsize = TextUtils.TruncateAt.START
+                col.addView(n)
+                col.addView(s)
+                col.setOnClickListener { cleanFileSheet(f, { showDupes(cat, true) }, null) }
+                row.addView(col, lp(0, -2, 1f))
+                card.addView(row, lp(-1, -2))
+            }
+            val mark = ghostButton("Marcar copias (conservar la más antigua)")
+            mark.setOnClickListener {
+                for (i in 1 until g.files.size) dupSel.add(g.files[i].absolutePath)
+                dupSel.remove(g.files[0].absolutePath)
+                showDupes(cat, true)
+            }
+            card.addView(mark, lp(-1, dp(44)).also { it.topMargin = dp(6) })
+            b.addView(card, lp(-1, -2).also { it.topMargin = dp(10) })
+        }
+        if (groups.size > 150) b.addView(txt("Se muestran los 150 grupos que más espacio ocupan.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(10) })
+
+        val sv = ScrollView(this)
+        sv.addView(b)
+        cleanScroll = sv
+        val frame = LinearLayout(this)
+        frame.orientation = LinearLayout.VERTICAL
+        frame.addView(sv, lp(-1, 0, 1f))
+        if (dupSel.isNotEmpty()) {
+            val sel = ArrayList<File>()
+            for (g in all) for (f in g.files) if (dupSel.contains(f.absolutePath)) sel.add(f)
+            var freed = 0L
+            for (f in sel) freed += f.length()
+            val bar = LinearLayout(this)
+            bar.setPadding(dp(14), dp(8), dp(14), dp(10))
+            val clear = ghostButton("Quitar marcas")
+            clear.setOnClickListener {
+                dupSel.clear()
+                showDupes(cat, true)
+            }
+            val del = primaryButton("Eliminar " + sel.size + " (" + fmtS(freed) + ")")
+            del.setOnClickListener { askDeleteDupes(all, cat) }
+            bar.addView(clear, lp(0, dp(48), 1f))
+            bar.addView(del, lp(0, dp(48), 1.4f).also { it.leftMargin = dp(10) })
+            frame.addView(bar, lp(-1, -2))
+        }
+        pageFixed("Duplicados", frame)
+        if (keep) sv.post { sv.scrollTo(0, y) }
+    }
+
+    private fun askDeleteDupes(all: List<DupGroup>, cat: Int) {
+        for (g in all) {
+            if (g.files.all { dupSel.contains(it.absolutePath) }) {
+                toast("En un grupo marcaste todas las copias. Deja al menos una sin marcar.")
+                return
+            }
+        }
+        val files = ArrayList<File>()
+        for (g in all) for (f in g.files) if (dupSel.contains(f.absolutePath)) files.add(f)
+        if (files.isEmpty()) return
+        confirmSheet("¿Eliminar " + files.size + " copias?", "Se conserva al menos una copia de cada grupo. Esta acción no se puede deshacer.", "Eliminar") { doDeleteDupes(files, cat) }
+    }
+
+    private fun doDeleteDupes(files: List<File>, cat: Int) {
+        toast("Eliminando…")
+        Thread {
+            var ok = 0
+            var fail = 0
+            var freed = 0L
+            for (f in files) {
+                val len = f.length()
+                try {
+                    java.nio.file.Files.delete(f.toPath())
+                    ok++
+                    freed += len
+                } catch (e: Exception) {
+                    fail++
+                }
+            }
+            runOnUiThread {
+                dupSel.clear()
+                toast("Eliminados " + ok + " (liberaste " + fmtS(freed) + ")" + (if (fail > 0) ". No se pudieron eliminar " + fail + "." else ""))
+                if (inViewer && curPage == "Duplicados") showDupes(cat, false)
+            }
+        }.start()
+    }
+
+    private fun showBig(cat: Int) {
+        val sc = cleanCache[root.absolutePath]
+        if (sc == null) {
+            showClean()
+            return
+        }
+        val live = sc.big.filter { it.f.exists() }
+        val list = live.filter { cat == 0 || it.cat == cat }
+        val b = body()
+        b.addView(cleanChips({ i -> if (i == 0) live.size else live.count { it.cat == i } }, cat) { i -> showBig(i) }, lp(-1, -2))
+        b.addView(txt("Los archivos más grandes que encontró el análisis (hasta 400), del más pesado al más ligero. Revisa cada uno antes de eliminarlo. Nexora no borra nada por su cuenta y no recomienda eliminar archivos del sistema ni de otras apps.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(10); it.bottomMargin = dp(4) })
+        if (list.isEmpty()) b.addView(txt("No hay archivos de este tipo entre los más grandes.", 14f, MUTE), lp(-1, -2).also { it.topMargin = dp(16) })
+        for (x in list.take(100)) {
+            val f = x.f
+            val sub = fmtS(x.size) + " · " + dateFmt.format(Date(x.mod)) + "\n" + relPath(f.parentFile ?: f)
+            b.addView(resultRow(f.name, sub) { cleanFileSheet(f, { showBig(cat) }, null) }, lp(-1, -2).also { it.topMargin = dp(8) })
+        }
+        page("Archivos grandes", b)
+    }
+
+    private fun showFolders() {
+        val sc = cleanCache[root.absolutePath]
+        if (sc == null) {
+            showClean()
+            return
+        }
+        val b = body()
+        b.addView(txt("Toca una carpeta para abrirla. Nexora no mueve archivos automáticamente.", 12f, MUTE))
+        b.addView(sectionTitle("Las que más ocupan"))
+        if (sc.folders.isEmpty()) b.addView(txt("No se encontraron carpetas con archivos.", 14f, MUTE))
+        for (fs in sc.folders) {
+            val sub = fs.files.toString() + " archivos (con subcarpetas) · " + fmtS(fs.bytes) + "\n" + relPath(fs.dir)
+            b.addView(resultRow(fs.dir.name, sub) { goToFolder(fs.dir) }, lp(-1, -2).also { it.topMargin = dp(8) })
+        }
+        b.addView(sectionTitle("Con muchos archivos sueltos"))
+        if (sc.crowded.isEmpty()) b.addView(txt("Ninguna carpeta tiene 100 archivos o más directamente dentro.", 14f, MUTE))
+        for (fs in sc.crowded) {
+            val sub = fs.direct.toString() + " archivos aquí · " + fmtS(fs.bytes) + "\nPodrías organizarlos en subcarpetas · " + relPath(fs.dir)
+            b.addView(resultRow(fs.dir.name, sub) { goToFolder(fs.dir) }, lp(-1, -2).also { it.topMargin = dp(8) })
+        }
+        page("Carpetas", b)
+    }
+
+    private fun showSimilar() {
+        val sc = cleanCache[root.absolutePath]
+        if (sc == null) {
+            showClean()
+            return
+        }
+        val b = body()
+        b.addView(txt("Posibles coincidencias, no confirmadas. Son fotos de la misma carpeta con el mismo nombre base (por ejemplo «foto» y «foto (1)») pero sin contenido idéntico. Nexora no compara las imágenes visualmente, así que revisa cada una. No son duplicados exactos.", 12f, MUTE))
+        var shown = 0
+        for (grp in sc.similar) {
+            val live = grp.filter { it.exists() }
+            if (live.size < 2) continue
+            shown++
+            val card = cardBox()
+            card.addView(txt(live.size.toString() + " fotos con nombre parecido", 15f, TXT, true))
+            card.addView(txt(relPath(live[0].parentFile ?: live[0]), 11f, MUTE))
+            for (f in live) {
+                val sub = fmtS(f.length()) + " · " + dateFmt.format(Date(f.lastModified()))
+                card.addView(resultRow(f.name, sub) { cleanFileSheet(f, { showSimilar() }, null) }, lp(-1, -2).also { it.topMargin = dp(6) })
+            }
+            b.addView(card, lp(-1, -2).also { it.topMargin = dp(10) })
+        }
+        if (shown == 0) b.addView(txt("No se encontraron posibles coincidencias.", 14f, MUTE), lp(-1, -2).also { it.topMargin = dp(16) })
+        page("Posibles similares", b)
+    }
+
+    private fun showDocClashes() {
+        val sc = cleanCache[root.absolutePath]
+        if (sc == null) {
+            showClean()
+            return
+        }
+        val b = body()
+        b.addView(txt("Documentos con el mismo nombre en carpetas distintas. Pueden causar confusiones. Toca uno para verlo, abrir su carpeta o renombrarlo con el nombre de su carpeta entre paréntesis.", 12f, MUTE))
+        var shown = 0
+        for (grp in sc.docClash) {
+            val live = grp.filter { it.exists() }
+            if (live.size < 2) continue
+            shown++
+            val card = cardBox()
+            card.addView(txt(live[0].name, 15f, TXT, true))
+            card.addView(txt(live.size.toString() + " copias con este nombre", 12f, ACC2))
+            for (f in live) {
+                val sub = fmtS(f.length()) + " · " + dateFmt.format(Date(f.lastModified())) + "\n" + relPath(f.parentFile ?: f)
+                val doAlt: () -> Unit = {
+                    val nf = File(f.parentFile, altName(f))
+                    if (nf.exists()) {
+                        toast("Ya existe un archivo con ese nombre")
+                    } else if (f.renameTo(nf)) {
+                        toast("Renombrado a " + nf.name)
+                        if (inViewer && curPage == "Documentos repetidos") showDocClashes()
+                    } else {
+                        toast("No se pudo renombrar")
+                    }
+                }
+                val alt: Pair<String, () -> Unit> = Pair("Renombrar a «" + altName(f) + "»", doAlt)
+                card.addView(resultRow(f.name, sub) { cleanFileSheet(f, { showDocClashes() }, alt) }, lp(-1, -2).also { it.topMargin = dp(6) })
+            }
+            b.addView(card, lp(-1, -2).also { it.topMargin = dp(10) })
+        }
+        if (shown == 0) b.addView(txt("Ya no hay nombres repetidos.", 14f, MUTE), lp(-1, -2).also { it.topMargin = dp(16) })
+        page("Documentos repetidos", b)
+    }
+
+    private fun buildSuggestions(sc: CleanScan, from: () -> Unit): List<Sugerencia> {
+        val out = ArrayList<Sugerencia>()
+        val names = listOf("", "fotografías", "videos", "audios", "documentos")
+        val icons = listOf("", "📷", "🎬", "🎵", "📄")
+        val dups = liveDups(sc)
+        for (cat in 1..4) {
+            val dg = dups.filter { catOf(it.files[0]) == cat }
+            if (dg.isNotEmpty()) {
+                var rec = 0L
+                for (g in dg) rec += g.size * (g.files.size - 1)
+                out.add(Sugerencia(icons[cat], dg.size.toString() + " grupos de " + names[cat] + " duplicados", "Podrías recuperar " + fmtS(rec) + " si conservas una copia de cada grupo. Revísalos antes de decidir.", "Revisar duplicados") { cleanGo(from) { showDupes(cat, false) } })
+            }
+        }
+        for (cat in 1..3) {
+            val gen = sc.generic[cat]
+            var total = 0
+            for (l in gen.values) total += l.size
+            val best = gen.entries.maxByOrNull { it.value.size }
+            if (total >= 5 && best != null && best.value.size >= 2) {
+                val verbo = if (cat == 1) "Renombrar fotografías" else if (cat == 2) "Renombrar videos" else "Renombrar audios"
+                out.add(Sugerencia(icons[cat], total.toString() + " " + names[cat] + " con nombres genéricos", "Por ejemplo «" + best.value[0].name + "». La mayor parte está en «" + File(best.key).name + "» (" + best.value.size + "). El renombre múltiple les pone un nombre común y las numera.", verbo) { renameInFolder(File(best.key), best.value) })
+            }
+            val md = sc.mediaByDir[cat].entries.maxByOrNull { it.value }
+            val minimo = if (cat == 1) 100 else 50
+            if (md != null && md.value >= minimo) {
+                out.add(Sugerencia(icons[cat], "La carpeta «" + File(md.key).name + "» tiene " + md.value + " " + names[cat], "Puedes organizarlos en subcarpetas (por fecha, evento o tipo). Nexora no mueve nada automáticamente.", "Organizar carpeta") { goToFolder(File(md.key)) })
+            }
+        }
+        val vids = sc.big.filter { it.cat == 2 && it.f.exists() }
+        if (vids.size >= 3) {
+            out.add(Sugerencia("🎬", "Entre los archivos más grandes hay " + vids.size + " videos", "El más pesado ocupa " + fmtS(vids[0].size) + ". Míralos ordenados por tamaño y decide cuáles conservar.", "Ver videos por tamaño") { cleanGo(from) { showBig(2) } })
+        }
+        val clash = ArrayList<List<File>>()
+        for (grp in sc.docClash) {
+            val live = grp.filter { it.exists() }
+            if (live.size >= 2) clash.add(live)
+        }
+        if (clash.isNotEmpty()) {
+            out.add(Sugerencia("📄", clash.size.toString() + " nombres de documentos repetidos", "Por ejemplo «" + clash[0][0].name + "» aparece " + clash[0].size + " veces en carpetas distintas. Puedes darle un nombre distinto a cada copia.", "Revisar documentos") { cleanGo(from) { showDocClashes() } })
+        }
+        val bigDocs = sc.big.filter { it.cat == 4 && it.size >= 20971520L && it.f.exists() }
+        if (bigDocs.isNotEmpty()) {
+            out.add(Sugerencia("📄", bigDocs.size.toString() + " documentos de más de 20 MB", "Los documentos grandes suelen ser escaneos o archivos pesados. Revisa si todavía los necesitas.", "Ver documentos grandes") { cleanGo(from) { showBig(4) } })
+        }
+        val mixed = sc.docMixed.firstOrNull()
+        if (mixed != null) {
+            out.add(Sugerencia("📄", "La carpeta «" + mixed.first.name + "» tiene " + mixed.second + " documentos de varios tipos", "Puedes ordenarlos por tipo, fecha o nombre con el botón ⇅ de la carpeta, o agruparlos en subcarpetas por extensión.", "Organizar carpeta") { goToFolder(mixed.first) })
+        }
+        val huge = sc.big.count { it.size >= 104857600L && it.f.exists() }
+        if (huge > 0) {
+            out.add(Sugerencia("📦", huge.toString() + " archivos de más de 100 MB", "Son los que más espacio ocupan. Revisa cada uno antes de eliminarlo; no borres archivos del sistema ni de otras apps.", "Ver archivos grandes") { cleanGo(from) { showBig(0) } })
+        }
+        val crowd = sc.crowded.firstOrNull()
+        if (crowd != null) {
+            out.add(Sugerencia("📁", "La carpeta «" + crowd.dir.name + "» tiene " + crowd.direct + " archivos sueltos", "Podrías organizarla en subcarpetas. Nexora no mueve archivos automáticamente.", "Organizar carpeta") { goToFolder(crowd.dir) })
+        }
+        if (sc.similar.isNotEmpty()) {
+            out.add(Sugerencia("🔍", sc.similar.size.toString() + " grupos de posibles fotos similares", "Son coincidencias por nombre, sin confirmar. Revísalas con calma antes de decidir.", "Ver posibles similares") { cleanGo(from) { showSimilar() } })
+        }
+        return out
+    }
+
+    private fun showSuggestions() {
+        val sc = cleanCache[root.absolutePath]
+        if (sc == null) {
+            showClean()
+            return
+        }
+        val b = body()
+        val sugs = buildSuggestions(sc) { showSuggestions() }
+        b.addView(txt("Recomendaciones según los archivos que encontró el análisis. Nexora solo sugiere: tú decides qué hacer.", 12f, MUTE))
+        if (sugs.isEmpty()) b.addView(txt("Por ahora no hay recomendaciones claras para este almacenamiento.", 14f, MUTE), lp(-1, -2).also { it.topMargin = dp(16) })
+        for (s in sugs) {
+            val card = cardBox()
+            card.addView(txt(s.icon + "  " + s.titulo, 15f, TXT, true))
+            card.addView(txt(s.detalle, 13f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
+            val btn = ghostButton(s.accion)
+            btn.setOnClickListener { s.hacer() }
+            card.addView(btn, lp(-1, dp(46)).also { it.topMargin = dp(10) })
+            b.addView(card, lp(-1, -2).also { it.topMargin = dp(10) })
+        }
+        page("Recomendaciones", b)
+    }
+
+    private fun quickBtn(icon: String, label: String, onClick: () -> Unit): TextView {
+        val t = txt(icon + "  " + label, 14f, TXT, true)
+        t.gravity = Gravity.CENTER
+        t.isSingleLine = true
+        t.background = rounded(alpha(ACC, 0x33), 14)
+        t.setOnClickListener { onClick() }
+        return t
+    }
+
+    private fun saveSort() {
+        prefs.edit().putInt("sort", sortIdx).putBoolean("folders", foldersFirst).commit()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (sortReady) saveSort()
     }
 
     @Deprecated("Deprecated in Java")
