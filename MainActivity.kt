@@ -215,7 +215,18 @@ class MainActivity : Activity() {
                     "Ampliación clásica (sin IA) como alternativa y para comparar el resultado",
                     "El modelo de IA (unos 5 MB) se descarga solo con tu permiso: tus imágenes nunca salen del teléfono",
                     "Progreso con tiempo restante, cancelación y avisos de memoria",
-                    "Puedes volver al original antes de guardar y nunca se sobrescribe un archivo"))))
+                    "Puedes volver al original antes de guardar y nunca se sobrescribe un archivo")))),
+        Entrada("0.4.3", null, "Mejorar imágenes: proceso a la vista",
+            "Al pulsar Mejorar ahora ves tu imagen y el avance real del trabajo, y los errores se explican con opciones para reintentar.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Pantalla de procesamiento con tu imagen a la vista, etapas reales y un porcentaje que solo refleja trabajo ya hecho")),
+                Seccion("Mejoras", listOf(
+                    "Si falta el modelo de IA, Mejorar ofrece descargarlo y continúa solo al terminar",
+                    "Los errores se explican con opciones para reintentar, descargar el modelo otra vez o usar la ampliación clásica",
+                    "Aviso claro cuando la imagen supera el tamaño permitido para la ampliación elegida")),
+                Seccion("Correcciones", listOf(
+                    "El botón Mejorar ya no queda inactivo cuando el modelo de IA no está instalado"))))
     )
 
     private val pendientes = listOf(
@@ -1979,7 +1990,10 @@ class MainActivity : Activity() {
     }
 
     private fun friendlyError(e: Throwable): String =
-        if (e is OutOfMemoryError) "memoria insuficiente en el dispositivo" else (e.message ?: e.javaClass.simpleName)
+        if (e is OutOfMemoryError) "memoria insuficiente en el dispositivo"
+        else if (e is java.net.UnknownHostException) "no hay conexión a internet"
+        else if (e is java.net.SocketTimeoutException) "la conexión tardó demasiado"
+        else (e.message ?: e.javaClass.simpleName)
 
     private fun updateJobRow(j: ConvJob) {
         val st = j.statusView ?: return
@@ -2522,8 +2536,6 @@ class MainActivity : Activity() {
         } else if (px > maxPx) {
             reason = "Esta imagen tiene " + String.format("%.1f", px / 1000000.0) + " MP y el máximo para " + scale + "× con este método es " + String.format("%.1f", maxPx / 1000000.0) + " MP. Elige 2× o una imagen más pequeña."
         }
-        var canGo = reason.isEmpty()
-
         if (ia) {
             b.addView(sectionTitle("Modelo de IA"))
             val card = cardBox()
@@ -2537,7 +2549,6 @@ class MainActivity : Activity() {
                 aiDlBar = bar
                 card.addView(lbl)
                 card.addView(bar, lp(-1, dp(6)).also { it.topMargin = dp(8) })
-                canGo = false
             } else if (modelReady()) {
                 card.addView(txt("Modelo instalado (" + fmt(modelFile().length()) + ")", 13f, GREEN, true))
                 val del = ghostButton("Eliminar modelo")
@@ -2554,83 +2565,95 @@ class MainActivity : Activity() {
                     confirmSheet("¿Descargar el modelo de IA?", "Se descargarán unos 5 MB desde qaihub-public-assets.s3.us-west-2.amazonaws.com y necesitas conexión a internet. Licencias: BSD-3 (modelo original) y AI Model Hub License (archivo descargado).", "Descargar") { startModelDownload() }
                 }
                 card.addView(dl, lp(-1, dp(46)).also { it.topMargin = dp(10) })
-                canGo = false
             }
             b.addView(card, lp(-1, -2))
         }
 
         if (reason.isNotEmpty()) b.addView(txt(reason, 13f, amber, true), lp(-1, -2).also { it.topMargin = dp(10) })
         val go = primaryButton("Mejorar")
-        go.isEnabled = canGo
-        go.alpha = if (canGo) 1f else 0.4f
-        go.setOnClickListener { startEnhance(f) }
+        go.setOnClickListener { requestEnhance(f, reason) }
         b.addView(go, lp(-1, dp(52)).also { it.topMargin = dp(18) })
+        if (ia && aiDlPct < 0 && !modelReady()) b.addView(txt("Al pulsar Mejorar se te ofrecerá descargar el modelo de IA (≈ 5 MB) y la mejora empezará sola.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
         addExplanation(b)
         page("Mejorar imágenes", b)
         pageScroll?.post { pageScroll?.scrollTo(0, y) }
     }
 
-    private fun startModelDownload() {
-        aiDlPct = 0
-        showEnhance()
-        Thread {
-            var err: String? = null
-            val zipTmp = File(cacheDir, "modelo.zip")
-            try {
-                val cn = URL(modelUrl).openConnection() as HttpURLConnection
-                cn.connectTimeout = 15000
-                cn.readTimeout = 30000
-                cn.instanceFollowRedirects = true
-                if (cn.responseCode != 200) throw Exception("el servidor respondió " + cn.responseCode)
-                val total = cn.contentLengthLong
-                cn.inputStream.use { ins ->
-                    FileOutputStream(zipTmp).use { os ->
-                        val buf = ByteArray(32768)
-                        var read = 0L
-                        var last = -1
-                        while (true) {
-                            val n = ins.read(buf)
-                            if (n < 0) break
-                            os.write(buf, 0, n)
-                            read += n
-                            if (total > 0) {
-                                val pc = (read * 100 / total).toInt()
-                                if (pc != last) {
-                                    last = pc
-                                    runOnUiThread {
-                                        aiDlPct = pc
-                                        aiDlBar?.progress = pc
-                                        aiDlLabel?.text = "Descargando… " + pc + " %"
-                                    }
-                                }
+    private fun downloadModel(onPct: (Int) -> Unit) {
+        val zipTmp = File(cacheDir, "modelo.zip")
+        try {
+            val cn = URL(modelUrl).openConnection() as HttpURLConnection
+            cn.connectTimeout = 15000
+            cn.readTimeout = 30000
+            cn.instanceFollowRedirects = true
+            if (cn.responseCode != 200) throw Exception("el servidor respondió " + cn.responseCode)
+            val total = cn.contentLengthLong
+            if (total <= 0) onPct(-1)
+            cn.inputStream.use { ins ->
+                FileOutputStream(zipTmp).use { os ->
+                    val buf = ByteArray(32768)
+                    var read = 0L
+                    var last = -1
+                    while (true) {
+                        if (aiCancel) throw Exception("cancelado")
+                        val n = ins.read(buf)
+                        if (n < 0) break
+                        os.write(buf, 0, n)
+                        read += n
+                        if (total > 0) {
+                            val pc = (read * 100 / total).toInt()
+                            if (pc != last && pc < 100) {
+                                last = pc
+                                onPct(pc)
                             }
                         }
                     }
                 }
-                val md = File(filesDir, "models")
-                md.mkdirs()
-                val tmp = File(md, "descarga.tmp")
-                var found = false
-                ZipInputStream(FileInputStream(zipTmp).buffered()).use { z ->
-                    var e = z.nextEntry
-                    while (e != null) {
-                        if (!e.isDirectory && e.name.lowercase().endsWith(".tflite")) {
-                            FileOutputStream(tmp).use { os -> z.copyTo(os) }
-                            found = true
-                            break
+            }
+            onPct(-2)
+            val md = File(filesDir, "models")
+            md.mkdirs()
+            val tmp = File(md, "descarga.tmp")
+            var found = false
+            ZipInputStream(FileInputStream(zipTmp).buffered()).use { z ->
+                var e = z.nextEntry
+                while (e != null) {
+                    if (!e.isDirectory && e.name.lowercase().endsWith(".tflite")) {
+                        FileOutputStream(tmp).use { os -> z.copyTo(os) }
+                        found = true
+                        break
+                    }
+                    e = z.nextEntry
+                }
+            }
+            if (!found) throw Exception("el paquete descargado no contiene un modelo .tflite")
+            if (tmp.length() < 500000L) throw Exception("el modelo descargado está incompleto")
+            val mf = modelFile()
+            if (mf.exists()) mf.delete()
+            if (!tmp.renameTo(mf)) throw Exception("no se pudo guardar el modelo")
+        } finally {
+            zipTmp.delete()
+        }
+    }
+
+    private fun startModelDownload() {
+        aiDlPct = 0
+        aiCancel = false
+        showEnhance()
+        Thread {
+            var err: String? = null
+            try {
+                downloadModel { pc ->
+                    runOnUiThread {
+                        if (pc >= 0) {
+                            aiDlPct = pc
+                            aiDlBar?.progress = pc
                         }
-                        e = z.nextEntry
+                        aiDlLabel?.text = if (pc == -2) "Instalando modelo…" else if (pc < 0) "Descargando…" else "Descargando… " + pc + " %"
                     }
                 }
-                if (!found) throw Exception("el paquete descargado no contiene un modelo .tflite")
-                if (tmp.length() < 500000L) throw Exception("el modelo descargado está incompleto")
-                val mf = modelFile()
-                if (mf.exists()) mf.delete()
-                if (!tmp.renameTo(mf)) throw Exception("no se pudo guardar el modelo")
             } catch (e: Throwable) {
                 err = friendlyError(e)
-            } finally {
-                zipTmp.delete()
             }
             runOnUiThread {
                 aiDlPct = -1
@@ -2640,32 +2663,33 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun runSuperRes(src: Bitmap, scale: Int, onTile: (Int, Int) -> Unit): Bitmap {
+    private fun runSuperRes(src: Bitmap, scale: Int, report: (String, Int, String) -> Unit): Bitmap {
         val mf = modelFile()
-        if (!mf.exists()) throw Exception("el modelo de IA no está instalado")
+        if (!mf.exists()) throw ModelError("el modelo de IA no está instalado")
+        report("Cargando modelo de IA", -1, "La primera vez puede tardar unos segundos")
         val mapped = FileInputStream(mf).use { it.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, mf.length()) }
         val opts = Interpreter.Options()
         opts.setNumThreads(minOf(4, maxOf(1, Runtime.getRuntime().availableProcessors())))
         val interp = try {
             Interpreter(mapped, opts)
         } catch (e: Throwable) {
-            throw Exception("no se pudo cargar el modelo de IA: " + (e.message ?: e.javaClass.simpleName))
+            throw ModelError("no se pudo cargar el modelo de IA: " + (e.message ?: e.javaClass.simpleName))
         }
         try {
             val ti = interp.getInputTensor(0)
             val to = interp.getOutputTensor(0)
-            if (ti.dataType() != DataType.FLOAT32 || to.dataType() != DataType.FLOAT32) throw Exception("el modelo descargado no usa números de 32 bits")
+            if (ti.dataType() != DataType.FLOAT32 || to.dataType() != DataType.FLOAT32) throw ModelError("el modelo descargado no usa números de 32 bits")
             val si = ti.shape()
             val so = to.shape()
-            if (si.size != 4 || so.size != 4) throw Exception("el modelo tiene una forma inesperada")
+            if (si.size != 4 || so.size != 4) throw ModelError("el modelo tiene una forma inesperada")
             val nchw = si[1] == 3 && si[3] != 3
             val inH = if (nchw) si[2] else si[1]
             val inW = if (nchw) si[3] else si[2]
             val outH = if (nchw) so[2] else so[1]
             val outW = if (nchw) so[3] else so[2]
-            if (inH <= 0 || inW <= 0) throw Exception("el modelo tiene una forma inesperada")
+            if (inH <= 0 || inW <= 0) throw ModelError("el modelo tiene una forma inesperada")
             val up = outH / inH
-            if (up < 2 || outH != inH * up || outW != inW * up || up % scale != 0) throw Exception("el modelo no amplía como se esperaba")
+            if (up < 2 || outH != inH * up || outW != inW * up || up % scale != 0) throw ModelError("el modelo no amplía como se esperaba")
             val ds = up / scale
             val iw = src.width
             val ih = src.height
@@ -2685,6 +2709,8 @@ class MainActivity : Activity() {
             val oplane = outW * outH
             var range = 0
             var done = 0
+            val tStart = System.currentTimeMillis()
+            report("Mejorando imagen con IA", 0, "Procesando el primer bloque…")
             for (ty in 0 until tilesY) {
                 for (tx in 0 until tilesX) {
                     if (aiCancel) throw Exception("cancelado")
@@ -2717,7 +2743,11 @@ class MainActivity : Activity() {
                     inBuf.asFloatBuffer().put(inArr)
                     inBuf.rewind()
                     outBuf.rewind()
-                    interp.run(inBuf, outBuf)
+                    try {
+                        interp.run(inBuf, outBuf)
+                    } catch (e: Throwable) {
+                        throw ModelError("el motor de IA no pudo ejecutar el modelo en este teléfono: " + (e.message ?: e.javaClass.simpleName))
+                    }
                     outBuf.rewind()
                     outBuf.asFloatBuffer().get(outArr)
                     if (range == 0) {
@@ -2760,7 +2790,13 @@ class MainActivity : Activity() {
                     }
                     result.setPixels(block, 0, rw, cx * scale, cy * scale, rw, rh)
                     done++
-                    onTile(done, total)
+                    if (done < total) {
+                        val el = System.currentTimeMillis() - tStart
+                        val rem = el * (total - done) / done
+                        report("Mejorando imagen con IA", done * 100 / total, "Bloque " + done + " de " + total + " · tiempo restante aproximado: " + fmtTime(rem))
+                    } else {
+                        report("Finalizando", -1, "")
+                    }
                 }
             }
             return result
@@ -2769,44 +2805,125 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun startEnhance(f: File) {
+    private fun noticeSheet(title: String, msg: String) {
+        showSheet(false) { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt(title, 18f, TXT, true))
+            col.addView(txt(msg, 14f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+            val ok = primaryButton("Entendido")
+            ok.setOnClickListener { d.dismiss() }
+            col.addView(ok, lp(-1, dp(48)).also { it.topMargin = dp(16) })
+            col
+        }
+    }
+
+    private fun requestEnhance(f: File, reason: String) {
+        if (reason.isNotEmpty()) {
+            noticeSheet("No se puede mejorar esta imagen", reason)
+            return
+        }
+        if (aiMethod == 0 && aiDlPct >= 0) {
+            toast("El modelo de IA todavía se está descargando.")
+            return
+        }
+        if (aiMethod == 0 && !modelReady()) {
+            confirmSheet(
+                "Hace falta el modelo de IA",
+                "Se descargarán unos 5 MB desde qaihub-public-assets.s3.us-west-2.amazonaws.com (necesitas internet) y luego la mejora empieza sola. Tus imágenes no se envían a ningún sitio. Licencias: BSD-3 (modelo original) y AI Model Hub License (archivo descargado).",
+                "Descargar y mejorar"
+            ) { startEnhance(f, true) }
+            return
+        }
+        startEnhance(f, false)
+    }
+
+    private fun startEnhance(f: File, download: Boolean) {
         val scale = if (aiScale == 0) 2 else 4
         val ia = aiMethod == 0
         converting = true
         aiCancel = false
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        val b = body()
-        val head = txt("Preparando la imagen…", 17f, TXT, true)
-        b.addView(head)
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        val pv = ImageView(this)
+        pv.scaleType = ImageView.ScaleType.FIT_CENTER
+        pv.setPadding(dp(16), dp(8), dp(16), dp(8))
+        col.addView(pv, lp(-1, 0, 1f))
+        val panel = LinearLayout(this)
+        panel.orientation = LinearLayout.VERTICAL
+        panel.setPadding(dp(16), dp(8), dp(16), dp(18))
+        val stageT = txt("Preparando imagen", 17f, TXT, true)
+        val pctT = txt("", 17f, ACC2, true)
+        val top = LinearLayout(this)
+        top.gravity = Gravity.CENTER_VERTICAL
+        top.addView(stageT, lp(0, -2, 1f))
+        top.addView(pctT)
+        panel.addView(top)
         val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-        bar.max = 1000
+        bar.max = 100
+        bar.isIndeterminate = true
         bar.progressTintList = ColorStateList.valueOf(ACC)
-        b.addView(bar, lp(-1, dp(8)).also { it.topMargin = dp(12) })
-        val detail = txt("", 13f, MUTE)
-        b.addView(detail, lp(-1, -2).also { it.topMargin = dp(10) })
-        b.addView(txt(if (ia) "La IA se ejecuta en el procesador del teléfono: puede calentarse y gastar batería. Puedes cancelar cuando quieras." else "Ampliando por interpolación…", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(10) })
+        bar.indeterminateTintList = ColorStateList.valueOf(ACC)
+        panel.addView(bar, lp(-1, dp(8)).also { it.topMargin = dp(10) })
+        val detailT = txt("", 12f, MUTE)
+        panel.addView(detailT, lp(-1, -2).also { it.topMargin = dp(8) })
+        panel.addView(txt(if (ia) "La IA trabaja en el procesador del teléfono: puede calentarse y gastar batería. El porcentaje solo cuenta trabajo ya terminado. Puedes cancelar cuando quieras." else "Sin IA: se agranda la imagen por interpolación.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(6) })
         val cancel = ghostButton("Cancelar")
         cancel.setOnClickListener {
             aiCancel = true
             cancel.text = "Cancelando…"
             cancel.isEnabled = false
         }
-        b.addView(cancel, lp(-1, dp(48)).also { it.topMargin = dp(16) })
-        page("Mejorar imágenes", b)
+        panel.addView(cancel, lp(-1, dp(48)).also { it.topMargin = dp(14) })
+        col.addView(panel, lp(-1, -2))
+        pageFixed("Mejorar imágenes", col)
+        Thread {
+            val bm = try {
+                decodeFull(f, 1200)
+            } catch (e: Throwable) {
+                null
+            }
+            if (bm != null) runOnUiThread { pv.setImageBitmap(bm) }
+        }.start()
+        val report: (String, Int, String) -> Unit = { stage, pct, detail ->
+            runOnUiThread {
+                stageT.text = stage
+                if (pct < 0) {
+                    if (!bar.isIndeterminate) bar.isIndeterminate = true
+                    pctT.text = ""
+                } else {
+                    if (bar.isIndeterminate) bar.isIndeterminate = false
+                    bar.progress = pct
+                    pctT.text = pct.toString() + " %"
+                }
+                detailT.text = detail
+            }
+        }
         val t0 = System.currentTimeMillis()
         Thread {
+            var fromDownload = false
             try {
-                val src = flattenWhite(decodeFull(f, 0))
-                val onTile: (Int, Int) -> Unit = { d, tot ->
-                    val el = System.currentTimeMillis() - t0
-                    val rem = if (d > 0) el * (tot - d) / d else 0L
-                    runOnUiThread {
-                        head.text = "Mejorando con IA: bloque " + d + " de " + tot
-                        bar.progress = d * 1000 / tot
-                        detail.text = "Tiempo restante aproximado: " + fmtTime(rem)
+                if (ia && download) {
+                    fromDownload = true
+                    report("Descargando modelo de IA", -1, "Necesario una sola vez (≈ 5 MB)")
+                    downloadModel { pc ->
+                        if (pc == -2) report("Instalando modelo de IA", -1, "")
+                        else report("Descargando modelo de IA", pc, "Necesario una sola vez (≈ 5 MB)")
                     }
+                    fromDownload = false
                 }
-                val result: Bitmap = if (ia) runSuperRes(src, scale, onTile) else upscale(src, src.width * scale, src.height * scale)
+                if (aiCancel) throw Exception("cancelado")
+                report("Preparando imagen", -1, "")
+                val src = flattenWhite(decodeFull(f, 0))
+                val result: Bitmap
+                if (ia) {
+                    result = runSuperRes(src, scale, report)
+                } else {
+                    report("Ampliando imagen", -1, "Interpolación, sin IA")
+                    result = upscale(src, src.width * scale, src.height * scale)
+                }
+                report("Finalizando", -1, "")
                 val secs = fmtTime(System.currentTimeMillis() - t0)
                 aiOrig = src
                 aiResult = result
@@ -2817,14 +2934,56 @@ class MainActivity : Activity() {
                     showEnhanceResult()
                 }
             } catch (e: Throwable) {
+                val modelIssue = e is ModelError
+                val wasDownload = fromDownload
                 runOnUiThread {
                     converting = false
                     window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    if (aiCancel) toast("Procesamiento cancelado") else aiError = "No se pudo mejorar la imagen: " + friendlyError(e)
-                    showEnhance()
+                    if (aiCancel) {
+                        toast("Procesamiento cancelado")
+                        showEnhance()
+                    } else {
+                        showEnhanceError(f, friendlyError(e), modelIssue, wasDownload)
+                    }
                 }
             }
         }.start()
+    }
+
+    private fun showEnhanceError(f: File, msg: String, modelIssue: Boolean, wasDownload: Boolean) {
+        val b = body()
+        b.addView(txt("No se pudo mejorar la imagen", 20f, TXT, true))
+        val box = cardBox()
+        box.addView(txt(msg.replaceFirstChar { it.uppercase() }, 14f, c(0xFFFB7185), true))
+        val hint = if (wasDownload) "No se pudo descargar el modelo de IA. Revisa tu conexión a internet e inténtalo de nuevo."
+        else if (modelIssue) "El modelo de IA no funciona en este teléfono. Puedes descargarlo otra vez o usar la ampliación clásica, que no necesita IA."
+        else if (msg.contains("memoria")) "Prueba con 2× o con una imagen más pequeña."
+        else "Puedes reintentarlo o volver a las opciones."
+        box.addView(txt(hint, 13f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+        b.addView(box, lp(-1, -2).also { it.topMargin = dp(12) })
+        val retry = primaryButton("Reintentar")
+        retry.setOnClickListener { startEnhance(f, wasDownload) }
+        b.addView(retry, lp(-1, dp(50)).also { it.topMargin = dp(16) })
+        if (modelIssue) {
+            val again = ghostButton("Descargar el modelo otra vez")
+            again.setOnClickListener {
+                modelFile().delete()
+                startEnhance(f, true)
+            }
+            b.addView(again, lp(-1, dp(48)).also { it.topMargin = dp(8) })
+        }
+        if (aiMethod == 0) {
+            val classic = ghostButton("Usar ampliación clásica")
+            classic.setOnClickListener {
+                aiMethod = 1
+                startEnhance(f, false)
+            }
+            b.addView(classic, lp(-1, dp(48)).also { it.topMargin = dp(8) })
+        }
+        val back = ghostButton("Volver")
+        back.setOnClickListener { showEnhance() }
+        b.addView(back, lp(-1, dp(48)).also { it.topMargin = dp(8) })
+        page("Mejorar imágenes", b)
     }
 
     private fun showEnhanceResult() {
@@ -4277,3 +4436,6 @@ private class CompareView(ctx: Context, val before: Bitmap, val after: Bitmap) :
         }
     }
 }
+
+
+private class ModelError(msg: String) : Exception(msg)

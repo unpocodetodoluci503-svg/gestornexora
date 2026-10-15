@@ -11,8 +11,8 @@ android {
         applicationId = "com.gestor.archivos"
         minSdk = 26
         targetSdk = 34
-        versionCode = 402
-        versionName = "0.4.2"
+        versionCode = 403
+        versionName = "0.4.3"
         ndk {
             abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
         }
