@@ -226,7 +226,17 @@ class MainActivity : Activity() {
                     "Los errores se explican con opciones para reintentar, descargar el modelo otra vez o usar la ampliación clásica",
                     "Aviso claro cuando la imagen supera el tamaño permitido para la ampliación elegida")),
                 Seccion("Correcciones", listOf(
-                    "El botón Mejorar ya no queda inactivo cuando el modelo de IA no está instalado"))))
+                    "El botón Mejorar ya no queda inactivo cuando el modelo de IA no está instalado")))),
+        Entrada("0.4.4", null, "Mejorar imágenes: fotos grandes",
+            "Las fotos de teléfono ya se pueden mejorar: si superan el límite, puedes reducirlas antes de procesarlas.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Opción de reducir y mejorar para las fotos que superan el tamaño permitido, indicando a qué tamaño se reduce y qué resultado esperar")),
+                Seccion("Mejoras", listOf(
+                    "Aviso de batería baja antes de usar la IA",
+                    "El resultado indica cuando la imagen fue reducida y no muestra un factor de ampliación engañoso")),
+                Seccion("Correcciones", listOf(
+                    "El aviso de tamaño ya no sugiere elegir 2× cuando 2× ya está elegido"))))
     )
 
     private val pendientes = listOf(
@@ -238,7 +248,7 @@ class MainActivity : Activity() {
         "Convertir a MP3: Android no incluye codificador de MP3 y Nexora no tiene una biblioteca para ello.",
         "Convertir videos: requiere una biblioteca adicional (por ejemplo Media3 Transformer) que todavía no está incorporada.",
         "PDF a Word y otros documentos: no se puede conservar el formato con las herramientas actuales.",
-        "Mejorar imágenes: una imagen a la vez, hasta 1 MP en 4× y 2 MP en 2×, y procesado en el procesador del teléfono (sin GPU).",
+        "Mejorar imágenes: una imagen a la vez; entrada de hasta 1 MP en 4× y 2 MP en 2× (las fotos más grandes se reducen antes de mejorarlas); se procesa en el procesador del teléfono, sin GPU.",
         "Vista en cuadrícula: aún no existe.",
         "Extraer RAR y 7z: por ahora solo se extraen ZIP."
     )
@@ -312,6 +322,8 @@ class MainActivity : Activity() {
     private var aiName = ""
     private var aiFmt = 0
     private var aiDest: File? = null
+    private var aiShrink = false
+    private var aiShrunkUsed = false
     private var aiDlPct = -1
     private var aiDlBar: ProgressBar? = null
     private var aiDlLabel: TextView? = null
@@ -2437,6 +2449,31 @@ class MainActivity : Activity() {
         return Bitmap.createScaledBitmap(b, maxOf(1, (b.width * k).toInt()), maxOf(1, (b.height * k).toInt()), true)
     }
 
+    private fun aiMaxPx(ia: Boolean, scale: Int): Long =
+        if (ia) (if (scale == 4) 1000000L else 2000000L) else 24000000L / (scale * scale)
+
+    private fun shrinkDims(w: Int, h: Int, maxPx: Long): Pair<Int, Int> {
+        val k = Math.sqrt(maxPx.toDouble() / (w.toLong() * h)) * 0.999
+        return Pair(maxOf(1, (w * k).toInt()), maxOf(1, (h * k).toInt()))
+    }
+
+    private fun downscaleTo(src: Bitmap, nw: Int, nh: Int): Bitmap {
+        var cur = src
+        while (cur.width / 2 >= nw && cur.height / 2 >= nh) {
+            cur = Bitmap.createScaledBitmap(cur, cur.width / 2, cur.height / 2, true)
+        }
+        return if (cur.width == nw && cur.height == nh) cur else Bitmap.createScaledBitmap(cur, nw, nh, true)
+    }
+
+    private fun lowBattery(): Boolean {
+        val i = registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return false
+        val lvl = i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+        val sc = i.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100)
+        val st = i.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+        val charging = st == android.os.BatteryManager.BATTERY_STATUS_CHARGING || st == android.os.BatteryManager.BATTERY_STATUS_FULL
+        return lvl >= 0 && sc > 0 && lvl * 100 / sc <= 15 && !charging
+    }
+
     private fun openEnhancer(f: File?) {
         if (f != null) {
             aiFile = f
@@ -2444,6 +2481,7 @@ class MainActivity : Activity() {
             aiOrig = null
             aiName = ""
             aiDest = null
+            aiShrink = false
             selected.clear()
         }
         showEnhance()
@@ -2523,19 +2561,24 @@ class MainActivity : Activity() {
             showEnhance()
         })
         if (ia && scale == 2) b.addView(txt("2× usa el modelo de 4× y reduce el resultado a la mitad: suele quedar más limpio y usa menos memoria.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
-        b.addView(txt("Resultado: " + (w * scale) + " × " + (h * scale) + " px (" + scale + "×)", 13f, TXT, true), lp(-1, -2).also { it.topMargin = dp(8) })
+        val limitPx = aiMaxPx(ia, scale)
+        val tooBig = w > 0 && px > limitPx
+        val shr = if (tooBig) shrinkDims(w, h, limitPx) else Pair(w, h)
+        b.addView(txt((if (tooBig) "Resultado tras reducirla: " else "Resultado: ") + (shr.first * scale) + " × " + (shr.second * scale) + " px (" + scale + "× la imagen procesada)", 13f, TXT, true), lp(-1, -2).also { it.topMargin = dp(8) })
         if (ia && w > 0) {
-            val tiles = ((w + 95) / 96) * ((h + 95) / 96)
+            val tiles = ((shr.first + 95) / 96) * ((shr.second + 95) / 96)
             b.addView(txt("Se procesa en unos " + tiles + " bloques de 128 px. Según tu teléfono puede tardar desde unos segundos hasta varios minutos, y usa batería.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
         }
 
-        val maxPx = if (ia) (if (scale == 4) 1000000L else 2000000L) else 24000000L / (scale * scale)
         var reason = ""
         if (w <= 0) {
             reason = "No se pudo leer esta imagen."
-        } else if (px > maxPx) {
-            reason = "Esta imagen tiene " + String.format("%.1f", px / 1000000.0) + " MP y el máximo para " + scale + "× con este método es " + String.format("%.1f", maxPx / 1000000.0) + " MP. Elige 2× o una imagen más pequeña."
+        } else if (tooBig) {
+            reason = "Esta imagen tiene " + String.format("%.1f", px / 1000000.0) + " MP y el máximo de entrada para " + (if (ia) "IA " else "ampliación clásica ") + scale + "× es " + String.format("%.1f", limitPx / 1000000.0) + " MP." +
+                (if (ia && scale == 4) " Con 2× el máximo sube a 2,0 MP." else "") +
+                " Al pulsar Mejorar se te ofrecerá reducirla antes de procesarla."
         }
+
         if (ia) {
             b.addView(sectionTitle("Modelo de IA"))
             val card = cardBox()
@@ -2571,7 +2614,7 @@ class MainActivity : Activity() {
 
         if (reason.isNotEmpty()) b.addView(txt(reason, 13f, amber, true), lp(-1, -2).also { it.topMargin = dp(10) })
         val go = primaryButton("Mejorar")
-        go.setOnClickListener { requestEnhance(f, reason) }
+        go.setOnClickListener { requestEnhance(f, reason, tooBig) }
         b.addView(go, lp(-1, dp(52)).also { it.topMargin = dp(18) })
         if (ia && aiDlPct < 0 && !modelReady()) b.addView(txt("Al pulsar Mejorar se te ofrecerá descargar el modelo de IA (≈ 5 MB) y la mejora empezará sola.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
         addExplanation(b)
@@ -2818,24 +2861,53 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun requestEnhance(f: File, reason: String) {
-        if (reason.isNotEmpty()) {
+    private fun requestEnhance(f: File, reason: String, oversize: Boolean) {
+        if (reason.isNotEmpty() && !oversize) {
             noticeSheet("No se puede mejorar esta imagen", reason)
             return
         }
+        if (oversize) {
+            val ia = aiMethod == 0
+            val scale = if (aiScale == 0) 2 else 4
+            val lim = aiMaxPx(ia, scale)
+            val d = imageDims(f)
+            val sd = shrinkDims(d.first, d.second, lim)
+            confirmSheet(
+                "La imagen es demasiado grande",
+                "Tiene " + String.format("%.1f", d.first.toLong() * d.second / 1000000.0) + " MP y el máximo de entrada para este método es " + String.format("%.1f", lim / 1000000.0) + " MP. Se puede reducir a " + sd.first + "×" + sd.second + " px antes de mejorarla. El resultado tendrá unos " + (sd.first * scale) + "×" + (sd.second * scale) + " px, parecido al tamaño original: servirá sobre todo para limpiar ruido y artefactos, no para ganar resolución.",
+                "Reducir y mejorar"
+            ) {
+                aiShrink = true
+                continueEnhance(f)
+            }
+            return
+        }
+        aiShrink = false
+        continueEnhance(f)
+    }
+
+    private fun continueEnhance(f: File) {
         if (aiMethod == 0 && aiDlPct >= 0) {
             toast("El modelo de IA todavía se está descargando.")
             return
         }
-        if (aiMethod == 0 && !modelReady()) {
+        val needModel = aiMethod == 0 && !modelReady()
+        val launch: () -> Unit = {
+            if (aiMethod == 0 && lowBattery()) {
+                confirmSheet("Batería baja", "La IA usa mucho el procesador y gasta batería. Con poca carga conviene conectar el cargador. ¿Continuar de todos modos?", "Continuar") { startEnhance(f, needModel) }
+            } else {
+                startEnhance(f, needModel)
+            }
+        }
+        if (needModel) {
             confirmSheet(
                 "Hace falta el modelo de IA",
                 "Se descargarán unos 5 MB desde qaihub-public-assets.s3.us-west-2.amazonaws.com (necesitas internet) y luego la mejora empieza sola. Tus imágenes no se envían a ningún sitio. Licencias: BSD-3 (modelo original) y AI Model Hub License (archivo descargado).",
                 "Descargar y mejorar"
-            ) { startEnhance(f, true) }
-            return
+            ) { launch() }
+        } else {
+            launch()
         }
-        startEnhance(f, false)
     }
 
     private fun startEnhance(f: File, download: Boolean) {
@@ -2916,18 +2988,29 @@ class MainActivity : Activity() {
                 if (aiCancel) throw Exception("cancelado")
                 report("Preparando imagen", -1, "")
                 val src = flattenWhite(decodeFull(f, 0))
+                var work = src
+                var shrunk = ""
+                val lim = aiMaxPx(ia, scale)
+                if (src.width.toLong() * src.height > lim) {
+                    if (!aiShrink) throw Exception("la imagen supera el tamaño permitido")
+                    val sd = shrinkDims(src.width, src.height, lim)
+                    report("Reduciendo la imagen al tamaño permitido", -1, "")
+                    work = downscaleTo(src, sd.first, sd.second)
+                    shrunk = " · reducida de " + src.width + "×" + src.height + " a " + sd.first + "×" + sd.second + " antes de mejorarla"
+                }
                 val result: Bitmap
                 if (ia) {
-                    result = runSuperRes(src, scale, report)
+                    result = runSuperRes(work, scale, report)
                 } else {
                     report("Ampliando imagen", -1, "Interpolación, sin IA")
-                    result = upscale(src, src.width * scale, src.height * scale)
+                    result = upscale(work, work.width * scale, work.height * scale)
                 }
                 report("Finalizando", -1, "")
                 val secs = fmtTime(System.currentTimeMillis() - t0)
                 aiOrig = src
                 aiResult = result
-                aiInfo = (if (ia) "IA Real-ESRGAN general-x4v3" + (if (scale == 2) " (4× del modelo reducido a 2×)" else "") else "Ampliación clásica por interpolación (sin IA)") + " · tardó " + secs
+                aiInfo = (if (ia) "IA Real-ESRGAN general-x4v3" + (if (scale == 2) " (4× del modelo reducido a 2×)" else "") else "Ampliación clásica por interpolación (sin IA)") + " · tardó " + secs + shrunk
+                aiShrunkUsed = shrunk.isNotEmpty()
                 runOnUiThread {
                     converting = false
                     window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -3001,7 +3084,7 @@ class MainActivity : Activity() {
         val panel = LinearLayout(this)
         panel.orientation = LinearLayout.VERTICAL
         panel.setPadding(dp(16), dp(10), dp(16), dp(14))
-        panel.addView(txt("Original " + before.width + "×" + before.height + "  →  Mejorada " + after.width + "×" + after.height + " px (" + scale + "×)", 13f, TXT, true))
+        panel.addView(txt("Original " + before.width + "×" + before.height + "  →  Mejorada " + after.width + "×" + after.height + " px" + (if (aiShrunkUsed) "" else " (" + scale + "×)"), 13f, TXT, true))
         panel.addView(txt(aiInfo, 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(2) })
         panel.addView(chipGroup(listOf("Original", "Dividido", "Mejorada"), 1) {
             cmp.setSplit(if (it == 0) 1f else if (it == 1) 0.5f else 0f)
