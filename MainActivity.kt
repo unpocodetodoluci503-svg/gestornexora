@@ -38,6 +38,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.ParcelFileDescriptor
+import android.os.storage.StorageManager
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.TextUtils
@@ -236,7 +237,15 @@ class MainActivity : Activity() {
                     "Aviso de batería baja antes de usar la IA",
                     "El resultado indica cuando la imagen fue reducida y no muestra un factor de ampliación engañoso")),
                 Seccion("Correcciones", listOf(
-                    "El aviso de tamaño ya no sugiere elegir 2× cuando 2× ya está elegido"))))
+                    "El aviso de tamaño ya no sugiere elegir 2× cuando 2× ya está elegido")))),
+        Entrada("0.4.6", null, "Todo tu almacenamiento",
+            "Nexora ahora muestra la tarjeta SD y las memorias USB, y te explica por qué algunas carpetas del sistema no se pueden abrir.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Selector de almacenamiento para cambiar entre la memoria interna, la tarjeta SD y las memorias USB conectadas",
+                    "Aviso claro en las carpetas que Android protege (Android/data y Android/obb) en vez de mostrarlas vacías")),
+                Seccion("Mejoras", listOf(
+                    "Si quitas la tarjeta SD o la memoria USB mientras la usabas, Nexora vuelve sola a la memoria interna"))))
     )
 
     private val pendientes = listOf(
@@ -250,7 +259,8 @@ class MainActivity : Activity() {
         "PDF a Word y otros documentos: no se puede conservar el formato con las herramientas actuales.",
         "Mejorar imágenes: una imagen a la vez; entrada de hasta 1 MP en 4× y 2 MP en 2× (las fotos más grandes se reducen antes de mejorarlas); se procesa en el procesador del teléfono, sin GPU.",
         "Vista en cuadrícula: aún no existe.",
-        "Extraer RAR y 7z: por ahora solo se extraen ZIP."
+        "Extraer RAR y 7z: por ahora solo se extraen ZIP.",
+        "Android/data y Android/obb: desde Android 11 el sistema bloquea su lectura a todas las apps normales; abrirlas requeriría un método avanzado (por ejemplo Shizuku)."
     )
 
     // ---------- Opciones de personalización ----------
@@ -344,6 +354,7 @@ class MainActivity : Activity() {
 
     private lateinit var root: File
     private lateinit var dir: File
+    private var rootName = "Almacenamiento interno"
     private lateinit var pathView: TextView
     private lateinit var list: ListView
     private lateinit var emptyView: TextView
@@ -364,6 +375,13 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (hasAccess()) {
+            if (!root.exists()) {
+                root = Environment.getExternalStorageDirectory()
+                rootName = "Almacenamiento interno"
+                dir = root
+            } else if (!dir.exists()) {
+                dir = root
+            }
             if (!inViewer) {
                 showBrowser()
                 showWhatsNew()
@@ -1020,8 +1038,62 @@ class MainActivity : Activity() {
         return if (foldersFirst) l.sortedWith(compareBy<Item> { it.cat >= 0 }.then(main)) else l.sortedWith(main)
     }
 
+    private fun extraVolumes(): List<Pair<String, File>> {
+        val out = ArrayList<Pair<String, File>>()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return out
+        try {
+            val sm = getSystemService(Context.STORAGE_SERVICE) as StorageManager
+            for (v in sm.storageVolumes) {
+                if (v.isPrimary || v.state != Environment.MEDIA_MOUNTED) continue
+                var f: File? = null
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    f = v.directory
+                } else {
+                    try {
+                        val path = v.javaClass.getMethod("getPath").invoke(v) as? String
+                        if (path != null) f = File(path)
+                    } catch (e: Exception) {
+                    }
+                }
+                if (f != null && f.exists()) out.add((v.getDescription(this) ?: "Almacenamiento externo") to f)
+            }
+        } catch (e: Exception) {
+        }
+        return out
+    }
+
+    private fun storageSheet() {
+        val vols = listOf("Almacenamiento interno" to Environment.getExternalStorageDirectory()) + extraVolumes()
+        showSheet { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt("Almacenamiento", 18f, TXT, true))
+            for ((name, f) in vols) {
+                val r = optionRow(name, f.absolutePath == root.absolutePath)
+                r.setOnClickListener {
+                    d.dismiss()
+                    root = f
+                    rootName = name
+                    dir = f
+                    refresh()
+                }
+                col.addView(r, lp(-1, -2).also { it.topMargin = dp(4) })
+            }
+            col
+        }
+    }
+
+    private fun restrictedMsg(): String {
+        val p = dir.absolutePath
+        val protegida = p.contains("/Android/data") || p.contains("/Android/obb")
+        return if (protegida && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+            "Android protege esta carpeta (datos de otras apps) desde Android 11 y Nexora todavía no puede abrirla."
+        else "Nexora no puede leer esta carpeta."
+    }
+
     private fun refresh() {
-        val all = (dir.listFiles() ?: emptyArray<File>()).map { f ->
+        val raw = dir.listFiles()
+        val all = (raw ?: emptyArray<File>()).map { f ->
             Item(f, if (f.isDirectory) 0L else f.length(), f.lastModified(), if (f.isDirectory) -1 else catOf(f))
         }
         selected.retainAll(all.map { it.f }.toSet())
@@ -1033,8 +1105,8 @@ class MainActivity : Activity() {
             }
         }
         items = sortItems(all.filter { x -> x.cat < 0 || catIdx == 0 || x.cat == catIdx })
-        pathView.text = "Almacenamiento interno" + dir.absolutePath.removePrefix(root.absolutePath)
-        emptyView.text = if (all.isEmpty()) "Esta carpeta está vacía" else "No hay archivos de esta categoría aquí"
+        pathView.text = rootName + dir.absolutePath.removePrefix(root.absolutePath)
+        emptyView.text = if (raw == null) restrictedMsg() else if (all.isEmpty()) "Esta carpeta está vacía" else "No hay archivos de esta categoría aquí"
         list.adapter = RowAdapter()
         buildTools()
         updateSelBar()
@@ -1050,6 +1122,10 @@ class MainActivity : Activity() {
 
     private fun buildTools() {
         toolsRow.removeAllViews()
+        if (extraVolumes().isNotEmpty()) {
+            val st = chip("💾  " + rootName + " ▾", false) { storageSheet() }
+            toolsRow.addView(st, lp(-2, -2).also { it.rightMargin = dp(8) })
+        }
         val pill = txt("⇅  " + SHORT[sortIdx], 13f, ACC2, true)
         pill.setPadding(dp(14), dp(8), dp(14), dp(8))
         val pg = rounded(alpha(ACC, 0x2E), 20)
@@ -1471,7 +1547,7 @@ class MainActivity : Activity() {
             col.addView(sc, lp(-1, -2).also { it.topMargin = dp(8) })
 
             fun render() {
-                pathT.text = "Almacenamiento interno" + cur.absolutePath.removePrefix(root.absolutePath)
+                pathT.text = rootName + cur.absolutePath.removePrefix(root.absolutePath)
                 listBox.removeAllViews()
                 if (cur != root && cur.parentFile != null) {
                     val up = optionRow("‹  Subir", false)
@@ -1816,7 +1892,7 @@ class MainActivity : Activity() {
             val yes = primaryButton("Agregar")
 
             fun render() {
-                pathT.text = "Almacenamiento interno" + cur.absolutePath.removePrefix(root.absolutePath)
+                pathT.text = rootName + cur.absolutePath.removePrefix(root.absolutePath)
                 yes.text = if (chosen.isEmpty()) "Agregar" else "Agregar (" + chosen.size + ")"
                 yes.isEnabled = chosen.isNotEmpty()
                 yes.alpha = if (chosen.isEmpty()) 0.4f else 1f
