@@ -4,20 +4,25 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PixelFormat
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
-import android.graphics.LinearGradient
 import android.graphics.RectF
 import android.graphics.Shader
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.PowerManager
-import android.provider.Settings
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import kotlin.math.abs
 import kotlin.math.cos
@@ -27,12 +32,17 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 // ============================================================================
-//  Nexora · Halloween
-//  Capa de efectos que se dibuja ENCIMA de la app sin tocar MainActivity:
-//  calaveras con fuego y humo, ojos que brillan en la oscuridad, calabazas
-//  embrujadas, sangre sobre las tarjetas, brasas, telarañas y viñeta.
-//  No recibe toques (todo pasa a los botones de abajo).
+//  Nexora · Halloween (v2)
+//  - Fondo nocturno animado detrás de la app: luna, estrellas, murciélagos,
+//    nubes, niebla, cementerio, árboles muertos y relámpagos.
+//  - Capa de efectos encima: calaveras con fuego de partículas, calavera
+//    voladora, ojos en la oscuridad, calabazas, sangre que sigue a las
+//    tarjetas al deslizar, brasas, telarañas y viñeta.
+//  No toca MainActivity y no recibe toques.
 // ============================================================================
+
+private const val TAU = 6.2831855f
+private const val DEG = 0.017453292f
 
 private fun hc(v: Long): Int = v.toInt()
 
@@ -115,6 +125,18 @@ private class HwHost : Application.ActivityLifecycleCallbacks {
     override fun onActivityDestroyed(activity: Activity) {}
 }
 
+// Fondo que se pone detrás de cada pantalla (reemplaza el degradado azul)
+private class HwBg(val fx: HwView) : Drawable() {
+    override fun draw(canvas: Canvas) {
+        val b = bounds
+        fx.drawBackground(canvas, b.width().toFloat(), b.height().toFloat())
+    }
+
+    override fun setAlpha(alpha: Int) {}
+    override fun setColorFilter(colorFilter: ColorFilter?) {}
+    override fun getOpacity(): Int = PixelFormat.OPAQUE
+}
+
 private class HwPumpkin {
     var state = 0
     var wait = 0f
@@ -159,11 +181,10 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private val rnd = java.util.Random(31102026L)
     private var active = false
     private var posted = false
-    private var still = false
     private var lite = false
     private var lastNs = 0L
     private var minStepNs = 33000000L
-    private var t = 0f
+    var t = 0f
     private var W = 0f
     private var H = 0f
     private var botInset = 0f
@@ -172,6 +193,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private val pFill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val pGlow = Paint(Paint.ANTI_ALIAS_FLAG)
     private val pStroke = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val pFire = Paint(Paint.ANTI_ALIAS_FLAG)
     private val pBg = Paint()
     private val rect = RectF()
     private val tmp = Path()
@@ -190,9 +212,15 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private val shPumpkin = RadialGradient(-0.25f, -0.3f, 1.4f, intArrayOf(hc(0xFFFFA62B), hc(0xFFE8620C), hc(0xFFA93A06), hc(0xFF5C1A04)), floatArrayOf(0f, 0.4f, 0.8f, 1f), clamp)
     private val shLobe = RadialGradient(0f, -0.1f, 1.2f, intArrayOf(hc(0xFFE86A10), hc(0xFFB8410A), hc(0xFF6B1F05)), floatArrayOf(0f, 0.55f, 1f), clamp)
     private val shBloodTop = LinearGradient(0f, 0f, 0f, 1f, intArrayOf(hc(0xE0A1070B), hc(0x00A1070B)), null, clamp)
+    private val shFireHot = RadialGradient(0f, 0f, 1f, intArrayOf(hc(0xFFFFFFE6), hc(0xFFFFD25A), hc(0x77FF8A1F), hc(0x00FF4A00)), floatArrayOf(0f, 0.25f, 0.6f, 1f), clamp)
+    private val shFireMid = RadialGradient(0f, 0f, 1f, intArrayOf(hc(0xFFFFB02E), hc(0xCCFF6A1A), hc(0x55D8330A), hc(0x00B3000F)), floatArrayOf(0f, 0.3f, 0.65f, 1f), clamp)
+    private val shFireOld = RadialGradient(0f, 0f, 1f, intArrayOf(hc(0xAAFF4A1A), hc(0x66B3140A), hc(0x00500008)), floatArrayOf(0f, 0.5f, 1f), clamp)
+    private val shMoon = RadialGradient(-0.3f, -0.3f, 1.4f, intArrayOf(hc(0xFFFFE2A8), hc(0xFFFFB35C), hc(0xFFE0782A)), floatArrayOf(0f, 0.55f, 1f), clamp)
+    private val shFog = RadialGradient(0f, 0f, 1f, intArrayOf(hc(0x55A090C8), hc(0x30806AA8), hc(0x00604A88)), floatArrayOf(0f, 0.5f, 1f), clamp)
     private var shVig: Shader? = null
     private var shHaze: Shader? = null
     private var shFloor: Shader? = null
+    private var shSky: Shader? = null
 
     private val BLOOD = hc(0xFFA3070D)
     private val BLOOD_DARK = hc(0xFF5B0309)
@@ -217,13 +245,47 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private val sph = FloatArray(maxSm)
     private var smokeT = 0f
 
+    // fuego de partículas
+    private val maxFire = 140
+    private val fpx = FloatArray(maxFire)
+    private val fpy = FloatArray(maxFire)
+    private val fvx = FloatArray(maxFire)
+    private val fvy = FloatArray(maxFire)
+    private val fage = FloatArray(maxFire)
+    private val flife = FloatArray(maxFire)
+    private val fsz = FloatArray(maxFire)
+    private var fireAcc = 0f
+    private var emberAcc = 0f
+
     private val lurks = arrayOf(HwLurk(), HwLurk(), HwLurk())
     private val pumps = arrayOf(HwPumpkin(), HwPumpkin(), HwPumpkin())
+    private val flyer = HwPumpkin()
 
     private val maxCards = 16
     private val cardF = FloatArray(maxCards * 9)
     private val cardSeed = IntArray(maxCards)
     private var cardN = 0
+
+    // fondo
+    private var bgW = 0f
+    private var bgH = 0f
+    private val groundPath = Path()
+    private val stonePath = Path()
+    private val boltPath = Path()
+    private val treeSeg = FloatArray(5 * 40)
+    private var treeN = 0
+    private var boltWait = 6f
+    private var boltAge = 99f
+    private var bgRoot: View? = null
+    private var vto: ViewTreeObserver? = null
+
+    private val preDraw = ViewTreeObserver.OnPreDrawListener {
+        hookBackground()
+        true
+    }
+    private val scrollL = ViewTreeObserver.OnScrollChangedListener {
+        if (active) invalidate()
+    }
 
     init {
         isClickable = false
@@ -232,10 +294,12 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         pStroke.style = Paint.Style.STROKE
         pStroke.strokeCap = Paint.Cap.ROUND
         pStroke.strokeJoin = Paint.Join.ROUND
-        pumps[0].wait = 1.5f
-        pumps[1].wait = 4.5f
-        pumps[2].wait = 8f
-        for (l in lurks) l.wait = rf(0.5f, 5f)
+        pFire.xfermode = PorterDuffXfermode(PorterDuff.Mode.ADD)
+        pumps[0].wait = 0.8f
+        pumps[1].wait = 2.8f
+        pumps[2].wait = 5f
+        flyer.wait = 4f
+        for (l in lurks) l.wait = rf(0.5f, 4f)
     }
 
     private fun rf(a: Float, b: Float): Float = a + (b - a) * rnd.nextFloat()
@@ -252,11 +316,9 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
 
     private fun readEnv() {
         try {
-            val sc = Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
-            still = sc == 0f
             val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             lite = pm.isPowerSaveMode
-            minStepNs = if (lite) 66000000L else 33000000L
+            minStepNs = if (lite) 50000000L else 33000000L
             nEmb = if (lite) 10 else maxEmb
         } catch (e: Exception) {
         }
@@ -272,10 +334,6 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     }
 
     private fun schedule() {
-        if (still) {
-            invalidate()
-            return
-        }
         if (!active || posted || !isAttachedToWindow) return
         posted = true
         Choreographer.getInstance().postFrameCallback(this)
@@ -293,6 +351,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             t += dt
             step(dt)
             invalidate()
+            bgRoot?.invalidate()
         }
         schedule()
     }
@@ -301,6 +360,10 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         super.onAttachedToWindow()
         lastNs = 0L
         readInsets()
+        val o = viewTreeObserver
+        vto = o
+        o.addOnPreDrawListener(preDraw)
+        o.addOnScrollChangedListener(scrollL)
         if (active) schedule()
     }
 
@@ -308,10 +371,34 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         super.onDetachedFromWindow()
         Choreographer.getInstance().removeFrameCallback(this)
         posted = false
+        val o = vto
+        if (o != null && o.isAlive) {
+            o.removeOnPreDrawListener(preDraw)
+            o.removeOnScrollChangedListener(scrollL)
+        }
+        vto = null
     }
 
     override fun onTouchEvent(event: MotionEvent?): Boolean = false
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean = false
+
+    // Cambia el degradado azul de cada pantalla por el fondo de Halloween
+    private fun hookBackground() {
+        try {
+            val par = parent as? ViewGroup ?: return
+            val content = par.findViewById<ViewGroup>(android.R.id.content) ?: return
+            if (content.childCount == 0) return
+            val root = content.getChildAt(0)
+            val bg = root.background
+            if (bg is HwBg) {
+                bgRoot = root
+            } else if (bg is GradientDrawable) {
+                root.background = HwBg(this)
+                bgRoot = root
+            }
+        } catch (e: Exception) {
+        }
+    }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         super.onSizeChanged(w, h, ow, oh)
@@ -356,7 +443,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         ex[i] = rf(0f, max(W, 1f))
         ey[i] = if (anywhere) rf(0f, max(H, 1f)) else H + rf(0f, 40f * d)
         evy[i] = rf(18f, 48f) * d
-        eph[i] = rf(0f, 6.2831855f)
+        eph[i] = rf(0f, TAU)
         er[i] = rf(1.1f, 2.8f) * d
         ety[i] = rnd.nextInt(3)
     }
@@ -372,9 +459,12 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         stepSmoke(dt)
         stepLurks(dt)
         stepPumpkins(dt)
+        stepFlyer(dt)
+        stepFire(dt)
+        stepBolt(dt)
     }
 
-    private fun skullS(): Float = 38f * d
+    private fun skullS(): Float = 44f * d
     private fun skullX(i: Int): Float = if (i == 0) skullS() * 0.95f else W - skullS() * 0.95f
     private fun skullY(): Float = H - botInset + skullS() * 0.12f
 
@@ -393,7 +483,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         smokeT += dt
         if (smokeT > (if (lite) 0.5f else 0.26f)) {
             smokeT = 0f
-            for (k in 0..1) emitSmoke(skullX(k) + rf(-8f, 8f) * d, skullY() - skullS() * 1.1f, if (k == 0) 5f * d else -5f * d)
+            for (k in 0..1) emitSmoke(skullX(k) + rf(-8f, 8f) * d, skullY() - skullS() * 1.5f, if (k == 0) 5f * d else -5f * d)
         }
     }
 
@@ -407,6 +497,72 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 slife[i] = rf(2.4f, 3.8f)
                 sph[i] = rf(0f, 6.28f)
                 return
+            }
+        }
+    }
+
+    // ---- fuego: partículas suaves que suben, se achican y cambian de color ----
+    private fun emitFire(x: Float, y: Float, size: Float, rise: Float, life: Float) {
+        for (i in 0 until maxFire) {
+            if (flife[i] <= 0f) {
+                fpx[i] = x
+                fpy[i] = y
+                fvx[i] = rf(-14f, 14f) * d
+                fvy[i] = -rf(60f, 125f) * d * rise
+                fage[i] = 0f
+                flife[i] = rf(0.45f, 0.95f) * life
+                fsz[i] = size * rf(0.7f, 1.2f)
+                return
+            }
+        }
+    }
+
+    private fun emitSkullFire(cx: Float, cy: Float, s: Float, tilt: Float) {
+        val th = rf(-155f, -25f) * DEG
+        val lx = cos(th) * 0.88f
+        val ly = sin(th) * 0.88f
+        val tr = tilt * DEG
+        val wx = cx + (lx * cos(tr) - ly * sin(tr)) * s
+        val wy = cy + (lx * sin(tr) + ly * cos(tr)) * s
+        emitFire(wx, wy, s * rf(0.3f, 0.5f), 1f, 1f)
+    }
+
+    private fun stepFire(dt: Float) {
+        val rate = if (lite) 18f else 34f
+        fireAcc += dt * rate
+        val s = skullS()
+        var guard = 0
+        while (fireAcc >= 1f && guard < 6) {
+            fireAcc -= 1f
+            guard++
+            emitSkullFire(skullX(0), skullY(), s, 12f)
+            emitSkullFire(skullX(1), skullY(), s, -12f)
+            if (flyer.state != 0) emitSkullFire(flyer.x, flyer.y, flyer.r, flyer.rot)
+        }
+        if (fireAcc > 3f) fireAcc = 0f
+        // llamita sobre cada calabaza
+        emberAcc += dt * (if (lite) 8f else 16f)
+        var g2 = 0
+        while (emberAcc >= 1f && g2 < 4) {
+            emberAcc -= 1f
+            g2++
+            for (p in pumps) {
+                if (p.state != 0 && p.x > -p.r && p.x < W + p.r && p.y > -p.r && p.y < H + p.r) {
+                    emitFire(p.x + rf(-0.2f, 0.2f) * p.r, p.y - p.r * 1.15f, p.r * rf(0.14f, 0.22f), 0.55f, 0.7f)
+                }
+            }
+        }
+        if (emberAcc > 2f) emberAcc = 0f
+        for (i in 0 until maxFire) {
+            if (flife[i] > 0f) {
+                fage[i] += dt
+                if (fage[i] >= flife[i]) {
+                    flife[i] = 0f
+                } else {
+                    fpx[i] += (fvx[i] + sin(fage[i] * 10f + fpx[i] * 0.07f) * 14f * d) * dt
+                    fpy[i] += fvy[i] * dt
+                    fvy[i] *= (1f - 0.9f * dt)
+                }
             }
         }
     }
@@ -430,24 +586,23 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 l.age += dt
                 if (l.age >= l.life) {
                     l.life = 0f
-                    l.wait = rf(2f, 7f)
+                    l.wait = rf(1.5f, 5f)
                 }
             }
         }
     }
 
     private fun stepPumpkins(dt: Float) {
-        val maxActive = if (lite) 1 else 2
-        val n = if (lite) 2 else 3
+        val maxActive = if (lite) 2 else 3
         var act = 0
-        for (k in 0 until n) if (pumps[k].state != 0) act++
-        for (k in 0 until n) {
+        for (k in 0..2) if (pumps[k].state != 0) act++
+        for (k in 0..2) {
             val p = pumps[k]
             if (p.state == 0) {
                 p.wait -= dt
                 if (p.wait <= 0f) {
                     if (act >= maxActive) {
-                        p.wait = 1.5f
+                        p.wait = 1.2f
                     } else {
                         spawnPumpkin(p)
                         act++
@@ -467,7 +622,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 p.rot += p.laughAmt * sin(t * 52f) * 5f
                 if (p.tm >= p.dur) {
                     p.state = 0
-                    p.wait = rf(2.5f, 8f)
+                    p.wait = rf(1.2f, 4.5f)
                     p.laugh = 0f
                     p.laughAmt = 0f
                 }
@@ -477,12 +632,12 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
 
     private fun spawnPumpkin(p: HwPumpkin) {
         p.tm = 0f
-        p.ph = rf(0f, 6.2831855f)
-        p.r = rf(24f, 36f) * d
+        p.ph = rf(0f, TAU)
+        p.r = rf(28f, 42f) * d
         p.laugh = 0f
         p.laughAmt = 0f
         p.laughDone = false
-        if (rnd.nextFloat() < 0.58f) {
+        if (rnd.nextFloat() < 0.55f) {
             p.state = 1
             p.edge = when (rnd.nextInt(6)) {
                 0, 2 -> 0
@@ -492,7 +647,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             }
             p.along = if (p.edge <= 1) rf(0.14f, 0.86f) else rf(0.22f, 0.78f)
             p.dur = rf(5.8f, 8.2f)
-            p.show = rf(0.42f, 0.62f)
+            p.show = rf(0.45f, 0.65f)
             p.baseRot = when (p.edge) {
                 0 -> -22f
                 1 -> 22f
@@ -502,14 +657,14 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         } else {
             p.state = 2
             p.dir = if (rnd.nextBoolean()) 1f else -1f
-            p.dur = rf(9f, 15f)
+            p.dur = rf(8f, 13f)
             p.sx = if (p.dir > 0f) -1.8f * p.r else W + 1.8f * p.r
             p.ex = if (p.dir > 0f) W + 1.8f * p.r else -1.8f * p.r
             val rr = rnd.nextFloat()
             p.yb = if (rr < 0.15f) H * rf(-0.01f, 0.02f) else if (rr < 0.30f) H * rf(0.97f, 1f) - botInset * 0.5f else H * rf(0.14f, 0.86f)
             p.amp = rf(10f, 34f) * d
             p.fq = rf(0.9f, 1.7f)
-            p.bounce = rnd.nextFloat() < 0.35f
+            p.bounce = rnd.nextFloat() < 0.4f
         }
     }
 
@@ -549,7 +704,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
 
     private fun updateRoam(p: HwPumpkin, dt: Float) {
         val u = (p.tm / p.dur).coerceIn(0f, 1f)
-        val uu = u + 0.035f * sin(6.2831855f * u * 2f + p.ph)
+        val uu = u + 0.035f * sin(TAU * u * 2f + p.ph)
         p.x = p.sx + (p.ex - p.sx) * uu
         var yy = p.yb + p.amp * sin(p.tm * p.fq + p.ph) + p.amp * 0.35f * sin(p.tm * p.fq * 2.3f)
         if (p.bounce) yy -= abs(sin(p.tm * 3f + p.ph)) * p.r * 0.45f
@@ -557,6 +712,231 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         p.rot = sin(p.tm * p.fq * 1.4f + p.ph) * 11f + p.dir * 7f
         if (p.laugh <= 0f && p.x > p.r * 0.5f && p.x < W - p.r * 0.5f && rnd.nextFloat() < 0.35f * dt) {
             p.laugh = rf(1f, 1.8f)
+        }
+    }
+
+    // calavera voladora en llamas que cruza la pantalla
+    private fun stepFlyer(dt: Float) {
+        val p = flyer
+        if (p.state == 0) {
+            p.wait -= dt
+            if (p.wait <= 0f) {
+                p.state = 2
+                p.tm = 0f
+                p.ph = rf(0f, TAU)
+                p.r = 30f * d
+                p.dir = if (rnd.nextBoolean()) 1f else -1f
+                p.dur = rf(7f, 11f)
+                p.sx = if (p.dir > 0f) -2.4f * p.r else W + 2.4f * p.r
+                p.ex = if (p.dir > 0f) W + 2.4f * p.r else -2.4f * p.r
+                p.yb = H * rf(0.18f, 0.7f)
+                p.amp = rf(14f, 30f) * d
+                p.fq = rf(1f, 1.6f)
+                p.bounce = false
+            }
+        } else {
+            p.tm += dt
+            updateRoam(p, dt)
+            if (p.tm >= p.dur) {
+                p.state = 0
+                p.wait = rf(10f, 20f)
+            }
+        }
+    }
+
+    private fun stepBolt(dt: Float) {
+        if (boltAge < 1f) boltAge += dt
+        boltWait -= dt
+        if (boltWait <= 0f && bgW > 0f) {
+            boltWait = rf(8f, 16f)
+            boltAge = 0f
+            boltPath.reset()
+            var x = rf(0.15f, 0.85f) * bgW
+            var y = 0f
+            boltPath.moveTo(x, y)
+            val segs = 9
+            for (i in 1..segs) {
+                x += rf(-0.07f, 0.07f) * bgW
+                y = bgH * 0.6f * i / segs
+                boltPath.lineTo(x, y)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ fondo
+    private fun buildBg(w: Float, h: Float) {
+        bgW = w
+        bgH = h
+        shSky = LinearGradient(0f, 0f, 0f, h, intArrayOf(hc(0xFF1A0B33), hc(0xFF0E0720), hc(0xFF0A0614), hc(0xFF1C0509)), floatArrayOf(0f, 0.4f, 0.75f, 1f), clamp)
+        groundPath.reset()
+        groundPath.moveTo(0f, h)
+        groundPath.lineTo(0f, h * 0.935f)
+        groundPath.cubicTo(w * 0.25f, h * 0.9f, w * 0.45f, h * 0.975f, w * 0.7f, h * 0.925f)
+        groundPath.cubicTo(w * 0.85f, h * 0.9f, w * 0.95f, h * 0.94f, w, h * 0.925f)
+        groundPath.lineTo(w, h)
+        groundPath.close()
+        stonePath.reset()
+        val sxs = floatArrayOf(0.2f, 0.33f, 0.58f, 0.72f, 0.86f)
+        val sys = floatArrayOf(0.918f, 0.935f, 0.925f, 0.945f, 0.915f)
+        val sws = floatArrayOf(0.05f, 0.04f, 0.05f, 0.04f, 0.045f)
+        for (i in 0..4) {
+            val tw = w * sws[i]
+            rect.set(w * sxs[i], h * sys[i], w * sxs[i] + tw, h * sys[i] + tw * 1.6f)
+            stonePath.addRoundRect(rect, tw * 0.5f, tw * 0.5f, Path.Direction.CW)
+        }
+        treeN = 0
+        addBranch(w * 0.08f, h * 0.95f, -1.5707964f + 0.1f, h * 0.07f, 6f * d, 3, 5)
+        addBranch(w * 0.93f, h * 0.95f, -1.5707964f - 0.12f, h * 0.06f, 5f * d, 3, 11)
+    }
+
+    private fun addBranch(x: Float, y: Float, ang: Float, len: Float, wid: Float, depth: Int, seed: Int) {
+        if (treeN >= 40) return
+        val x2 = x + cos(ang) * len
+        val y2 = y + sin(ang) * len
+        val i = treeN * 5
+        treeSeg[i] = x
+        treeSeg[i + 1] = y
+        treeSeg[i + 2] = x2
+        treeSeg[i + 3] = y2
+        treeSeg[i + 4] = wid
+        treeN++
+        if (depth <= 0) return
+        val a1 = ang - (0.35f + 0.5f * hwHash(seed, depth * 3))
+        val a2 = ang + (0.3f + 0.5f * hwHash(seed, depth * 3 + 1))
+        addBranch(x2, y2, a1, len * (0.68f + 0.15f * hwHash(seed, depth * 3 + 2)), wid * 0.66f, depth - 1, seed + 7)
+        addBranch(x2, y2, a2, len * 0.66f, wid * 0.62f, depth - 1, seed + 13)
+    }
+
+    private fun drawBat(c: Canvas, bx: Float, by: Float, s: Float, fl: Float) {
+        c.save()
+        c.translate(bx, by)
+        pFill.shader = null
+        pFill.color = hc(0xFF08040E)
+        rect.set(-0.35f * s, -0.5f * s, 0.35f * s, 0.6f * s)
+        c.drawOval(rect, pFill)
+        for (side in 0..1) {
+            c.save()
+            if (side == 1) c.scale(-1f, 1f)
+            tmp.reset()
+            tmp.moveTo(0.2f * s, -0.2f * s)
+            tmp.quadTo(1f * s, -0.9f * s * fl - 0.5f * s, 2f * s, -0.7f * s * fl + 0.1f * s)
+            tmp.lineTo(1.55f * s, 0.3f * s)
+            tmp.lineTo(1.2f * s, 0.15f * s)
+            tmp.lineTo(0.9f * s, 0.45f * s)
+            tmp.lineTo(0.3f * s, 0.3f * s)
+            tmp.close()
+            c.drawPath(tmp, pFill)
+            c.restore()
+        }
+        pFill.color = hc(0xFFFF3030)
+        c.drawCircle(-0.15f * s, -0.3f * s, 0.08f * s, pFill)
+        c.drawCircle(0.15f * s, -0.3f * s, 0.08f * s, pFill)
+        c.restore()
+    }
+
+    fun drawBackground(c: Canvas, w: Float, h: Float) {
+        if (w <= 0f || h <= 0f) return
+        if (w != bgW || h != bgH) buildBg(w, h)
+        // cielo
+        pBg.shader = shSky
+        pBg.alpha = 255
+        c.drawRect(0f, 0f, w, h, pBg)
+        pBg.shader = null
+        // estrellas
+        pFill.shader = null
+        for (i in 0 until 46) {
+            val tw = 0.4f + 0.6f * sin(t * (0.8f + hwHash(i, 3) * 2f) + i)
+            pFill.color = hc(0xFFE6D8FF)
+            pFill.alpha = (tw.coerceIn(0f, 1f) * 190f).toInt()
+            c.drawCircle(hwHash(i, 1) * w, hwHash(i, 2) * h * 0.6f, (0.6f + 1f * hwHash(i, 4)) * d, pFill)
+        }
+        // luna
+        val mx = w * 0.78f
+        val my = h * 0.17f
+        val mr = 34f * d
+        c.save()
+        c.translate(mx, my)
+        c.scale(mr * 3.4f, mr * 3.4f)
+        pGlow.shader = shGlowOrange
+        pGlow.alpha = ((0.75f + 0.2f * sin(t * 0.9f)) * 255f).toInt()
+        c.drawCircle(0f, 0f, 1f, pGlow)
+        c.restore()
+        c.save()
+        c.translate(mx, my)
+        c.scale(mr, mr)
+        pFill.shader = shMoon
+        pFill.alpha = 255
+        c.drawCircle(0f, 0f, 1f, pFill)
+        pFill.shader = null
+        pFill.color = hc(0x30B4601C)
+        c.drawCircle(-0.3f, -0.2f, 0.22f, pFill)
+        c.drawCircle(0.35f, 0.1f, 0.28f, pFill)
+        c.drawCircle(-0.05f, 0.45f, 0.16f, pFill)
+        c.restore()
+        // nubes oscuras
+        for (k in 0..1) {
+            val span = w + 260f * d
+            val cx = ((t * (6f + k * 4f) * d + k * w * 0.6f) % span) - 130f * d
+            val cy = h * (0.13f + 0.09f * k)
+            pFill.color = hc(0x8A1A0F2E)
+            rect.set(cx - 70f * d, cy - 10f * d, cx + 70f * d, cy + 12f * d)
+            c.drawOval(rect, pFill)
+            rect.set(cx - 40f * d, cy - 20f * d, cx + 30f * d, cy + 6f * d)
+            c.drawOval(rect, pFill)
+            rect.set(cx - 10f * d, cy - 14f * d, cx + 60f * d, cy + 10f * d)
+            c.drawOval(rect, pFill)
+        }
+        // murciélagos
+        for (i in 0..4) {
+            val sp = (28f + 22f * hwHash(i, 11)) * d
+            val span = w + 160f * d
+            var bx = (t * sp + hwHash(i, 12) * span) % span
+            if (i % 2 == 1) bx = span - bx
+            bx -= 80f * d
+            val by = h * (0.07f + 0.4f * hwHash(i, 13)) + sin(t * 1.6f + i * 1.7f) * 16f * d
+            val s = (7f + 7f * hwHash(i, 14)) * d
+            drawBat(c, bx, by, s, sin(t * (11f + i) + i))
+        }
+        // relámpago
+        if (boltAge < 0.5f) {
+            val k = if (boltAge < 0.08f) 1f else if (boltAge < 0.14f) 0.2f else if (boltAge < 0.22f) 0.9f else max(0f, 1f - (boltAge - 0.22f) / 0.28f)
+            pFill.shader = null
+            pFill.color = hc(0xFFD8C8FF)
+            pFill.alpha = (k * 80f).toInt()
+            c.drawRect(0f, 0f, w, h, pFill)
+            pStroke.shader = null
+            pStroke.color = hc(0xFFEDE4FF)
+            pStroke.alpha = (k * 90f).toInt()
+            pStroke.strokeWidth = 7f * d
+            c.drawPath(boltPath, pStroke)
+            pStroke.color = hc(0xFFFFFFFF)
+            pStroke.alpha = (k * 255f).toInt()
+            pStroke.strokeWidth = 2.2f * d
+            c.drawPath(boltPath, pStroke)
+        }
+        // cementerio y árboles muertos
+        pFill.shader = null
+        pFill.color = hc(0xF006020C)
+        c.drawPath(groundPath, pFill)
+        c.drawPath(stonePath, pFill)
+        pStroke.shader = null
+        pStroke.color = hc(0xF006020C)
+        for (i in 0 until treeN) {
+            val j = i * 5
+            pStroke.strokeWidth = treeSeg[j + 4]
+            c.drawLine(treeSeg[j], treeSeg[j + 1], treeSeg[j + 2], treeSeg[j + 3], pStroke)
+        }
+        // niebla
+        pGlow.shader = shFog
+        for (k in 0..3) {
+            val fx = w * (0.2f + 0.2f * k) + sin(t * 0.25f + k * 1.7f) * w * 0.15f
+            val fy = h * (0.84f + 0.04f * k)
+            c.save()
+            c.translate(fx, fy)
+            c.scale(w * 0.45f, h * 0.07f)
+            pGlow.alpha = (200f * (0.7f + 0.3f * sin(t * 0.5f + k))).toInt().coerceIn(0, 255)
+            c.drawCircle(0f, 0f, 1f, pGlow)
+            c.restore()
         }
     }
 
@@ -584,9 +964,20 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         }
         drawBlood(c)
         drawSmoke(c)
-        for (k in 0..1) drawSkullWithFire(c, k)
+        for (k in 0..1) {
+            drawSkullBody(c, skullX(k), skullY() + sin(t * 1.3f + k * 2f) * 1.5f * d, skullS(), if (k == 0) 12f else -12f, k * 1.9f, k, skullJaw(k * 1.9f))
+        }
+        if (flyer.state != 0) {
+            drawSkullBody(c, flyer.x, flyer.y, flyer.r, flyer.rot, flyer.ph, 2, 0.08f + 0.08f * sin(t * 9f))
+        }
+        drawFire(c)
         drawLurks(c)
         for (p in pumps) if (p.state != 0) drawPumpkin(c, p)
+    }
+
+    private fun skullJaw(ph: Float): Float {
+        val j = sin(t * 2.3f + ph)
+        return if (j > 0.7f) (j - 0.7f) * 0.5f else 0f
     }
 
     private fun drawWebs(c: Canvas) {
@@ -634,28 +1025,32 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         }
     }
 
-    private fun flame(c: Canvas, bx: Float, by: Float, hh: Float, ww: Float, sway: Float, col: Int) {
-        pFill.shader = null
-        pFill.color = col
-        tmp.reset()
-        tmp.moveTo(bx - ww, by)
-        tmp.quadTo(bx - ww * 1.1f, by - hh * 0.55f, bx + sway, by - hh)
-        tmp.quadTo(bx + ww * 1.1f, by - hh * 0.5f, bx + ww, by)
-        tmp.close()
-        c.drawPath(tmp, pFill)
+    private fun drawFire(c: Canvas) {
+        for (i in 0 until maxFire) {
+            if (flife[i] <= 0f) continue
+            val u = fage[i] / flife[i]
+            pFire.shader = if (u < 0.28f) shFireHot else if (u < 0.62f) shFireMid else shFireOld
+            pFire.alpha = ((1f - u) * (1f - u * 0.3f) * 255f).toInt().coerceIn(0, 255)
+            val r = fsz[i] * (1f - 0.75f * u)
+            c.save()
+            c.translate(fpx[i], fpy[i])
+            c.scale(r, r)
+            c.drawCircle(0f, 0f, 1f, pFire)
+            c.restore()
+        }
     }
 
-    private fun drawSkullWithFire(c: Canvas, k: Int) {
-        val s = skullS()
-        val cx = skullX(k)
-        val cy = skullY() + sin(t * 1.3f + k * 2f) * 1.5f * d
-        val tilt = if (k == 0) 12f else -12f
-        val ph = k * 1.9f
+    private fun drawSkullBody(c: Canvas, cx: Float, cy: Float, s: Float, tilt: Float, ph: Float, k: Int, jaw: Float) {
+        if (cx < -3f * s || cx > W + 3f * s || cy < -3f * s || cy > H + 3f * s) return
         // resplandor
         c.save()
         c.translate(cx, cy)
-        c.scale(s * 2.5f, s * 2.5f)
-        pGlow.shader = shGlowRed
+        c.scale(s * 2.6f, s * 2.6f)
+        pGlow.shader = when (k) {
+            0 -> shGlowRed
+            1 -> shGlowViolet
+            else -> shGlowOrange
+        }
         pGlow.alpha = ((0.55f + 0.3f * sin(t * 2.6f + ph)) * 255f).toInt()
         c.drawCircle(0f, 0f, 1f, pGlow)
         c.restore()
@@ -664,9 +1059,14 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         c.translate(cx, cy)
         c.rotate(tilt)
         c.scale(s, s)
+        // boca oscura detrás de la mandíbula
+        pFill.shader = null
+        pFill.color = hc(0xFF120A14)
+        rect.set(-0.46f, 0.5f, 0.46f, 0.66f + jaw)
+        c.drawRect(rect, pFill)
         pFill.shader = shBone
         pFill.alpha = 255
-        rect.set(-0.56f, 0.5f, 0.56f, 1.32f)
+        rect.set(-0.56f, 0.5f + jaw, 0.56f, 1.32f + jaw)
         c.drawRoundRect(rect, 0.24f, 0.24f, pFill)
         c.drawCircle(0f, 0f, 1f, pFill)
         pStroke.shader = null
@@ -691,8 +1091,8 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         for (side in 0..1) {
             c.save()
             c.translate(if (side == 0) -0.38f else 0.38f, 0.05f)
-            c.scale(0.33f, 0.33f)
-            pGlow.shader = if (k == 0) shEye else shEyeV
+            c.scale(0.36f, 0.36f)
+            pGlow.shader = if (k == 1) shEyeV else shEye
             pGlow.alpha = ea
             c.drawCircle(0f, 0f, 1f, pGlow)
             c.restore()
@@ -711,9 +1111,9 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         pStroke.strokeWidth = 0.035f
         for (i in 0..4) {
             val x = -0.4f + i * 0.2f
-            c.drawLine(x, 0.8f, x, 1.26f, pStroke)
+            c.drawLine(x, 0.8f + jaw, x, 1.26f + jaw, pStroke)
         }
-        c.drawLine(-0.5f, 0.92f, 0.5f, 0.92f, pStroke)
+        c.drawLine(-0.5f, 0.92f + jaw, 0.5f, 0.92f + jaw, pStroke)
         // grieta y sangre
         c.drawLine(0.2f, -0.95f, 0.06f, -0.55f, pStroke)
         val bl = 0.3f + 0.08f * sin(t * 1.1f + ph)
@@ -723,21 +1123,6 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         pFill.color = BLOOD
         c.drawCircle(-0.42f, 0.3f + bl, 0.05f, pFill)
         c.restore()
-        // fuego sobre la cabeza
-        for (i in 0..5) {
-            val th = (-150f + 120f * i / 5f) * 0.017453292f
-            val lx = cos(th) * 0.92f
-            val ly = sin(th) * 0.92f
-            val tr = tilt * 0.017453292f
-            val wx = cx + (lx * cos(tr) - ly * sin(tr)) * s
-            val wy = cy + (lx * sin(tr) + ly * cos(tr)) * s
-            val hh = s * (0.85f + 0.55f * hwHash(i, k)) * (0.75f + 0.25f * sin(t * (6f + i) + ph + i))
-            val ww = s * 0.2f * (0.8f + 0.4f * hwHash(i + 9, k))
-            val sway = sin(t * 3.1f + i * 1.7f + ph) * ww * 0.8f
-            flame(c, wx, wy, hh, ww, sway, hc(0xB8E02A0A))
-            flame(c, wx, wy, hh * 0.75f, ww * 0.72f, sway * 0.8f, hc(0xC8FF7A12))
-            flame(c, wx, wy, hh * 0.5f, ww * 0.42f, sway * 0.6f, hc(0xD8FFD24A))
-        }
     }
 
     private fun drawLurks(c: Canvas) {
@@ -945,7 +1330,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             val h = cardF[i + 3]
             val rad = cardF[i + 4]
             val seed = cardSeed[k]
-            if (hwHash(seed, 1) > 0.78f) continue
+            if (hwHash(seed, 1) > 0.8f) continue
             c.save()
             c.clipRect(cardF[i + 5], cardF[i + 6], cardF[i + 7], cardF[i + 8])
             rect.set(x, y, x + w, y + h)
@@ -963,27 +1348,28 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             pFill.alpha = 255
             c.drawRect(0f, 0f, 1f, 1f, pFill)
             c.restore()
-            // gotas que cuelgan
+            // gotas: crecen, se desprenden, caen y vuelven a empezar
             pFill.shader = null
             val nd = 1 + (hwHash(seed, 5) * 2.99f).toInt()
-            val maxLen = min(h * 0.22f, 14f * d)
-            val sd = (seed and 7).toFloat()
+            val maxLen = min(h * 0.3f, 18f * d)
             for (j in 0 until nd) {
                 val fx = sx0 + sw * (0.1f + 0.8f * hwHash(seed, 10 + j))
-                val base = 0.45f + 0.55f * hwHash(seed, 20 + j)
-                val len = maxLen * base * (0.88f + 0.12f * sin(t * 0.7f + j * 2.1f + sd))
+                val base = 0.55f + 0.45f * hwHash(seed, 20 + j)
+                val spd = 0.09f + 0.07f * hwHash(seed, 25 + j)
+                val u = (t * spd + hwHash(seed, 40 + j)) % 1f
+                val lf = if (u < 0.8f) 0.2f + 0.8f * hwEase(u / 0.8f) else 1f - 0.8f * hwEase((u - 0.8f) / 0.2f)
+                val len = maxLen * base * lf
                 val wd = (2.6f + 1.8f * hwHash(seed, 30 + j)) * d
                 pFill.color = BLOOD
                 c.drawRoundRect(fx - wd * 0.5f, y, fx + wd * 0.5f, y + len, wd * 0.5f, wd * 0.5f, pFill)
                 c.drawCircle(fx, y + len, wd * 0.72f, pFill)
                 pFill.color = BLOOD_HI
                 c.drawRect(fx - wd * 0.28f, y, fx - wd * 0.1f, y + len * 0.8f, pFill)
-                val ph = (t * 0.22f + hwHash(seed, 40 + j) * 5f) % 1f
-                if (ph > 0.62f) {
-                    val u = (ph - 0.62f) / 0.38f
+                if (u > 0.8f) {
+                    val v = (u - 0.8f) / 0.2f
                     pFill.color = BLOOD
-                    pFill.alpha = ((1f - u) * 220f).toInt()
-                    c.drawCircle(fx, y + len + wd + u * 10f * d, wd * 0.38f, pFill)
+                    pFill.alpha = ((1f - v) * 230f).toInt()
+                    c.drawCircle(fx, y + len + wd * 0.7f + v * v * 16f * d, wd * 0.4f, pFill)
                 }
             }
             // salpicadura en una esquina
@@ -999,7 +1385,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 c.drawCircle(px + br * 0.2f, py + br * 0.15f, br * 0.55f, pFill)
                 pFill.color = BLOOD
                 for (m in 0 until 7) {
-                    val ang = hwHash(seed, 50 + m) * 6.2831855f
+                    val ang = hwHash(seed, 50 + m) * TAU
                     val dist = br * (1.3f + 2.8f * hwHash(seed, 60 + m))
                     val rr = (0.8f + 1.7f * hwHash(seed, 70 + m)) * d
                     c.drawCircle(px + cos(ang) * dist, py + sin(ang) * dist, rr, pFill)
@@ -1008,7 +1394,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 pStroke.color = BLOOD
                 pStroke.strokeWidth = 1.5f * d
                 for (m in 0 until 3) {
-                    val ang = hwHash(seed, 80 + m) * 6.2831855f
+                    val ang = hwHash(seed, 80 + m) * TAU
                     val ln = br * (2f + 2f * hwHash(seed, 90 + m))
                     c.drawLine(px, py, px + cos(ang) * ln, py + sin(ang) * ln, pStroke)
                 }
