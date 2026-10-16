@@ -288,7 +288,18 @@ class MainActivity : Activity() {
                 Seccion("Mejoras", listOf(
                     "Las sugerencias salen solo de datos reales del análisis y explican por qué aparecen")),
                 Seccion("Correcciones", listOf(
-                    "Duplicados: un archivo solo se marca como duplicado si su contenido es idéntico; se quitaron las listas que agrupaban por nombre"))))
+                    "Duplicados: un archivo solo se marca como duplicado si su contenido es idéntico; se quitaron las listas que agrupaban por nombre")))),
+        Entrada("0.5.8", null, "Archivos comprimidos e instalación de APK",
+            "Nexora ahora extrae ZIP, RAR, 7Z, TAR, GZ, BZ2 y XZ, comprime en ZIP e instala APK con el instalador oficial de Android.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Extracción de ZIP, RAR, 7Z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, GZ, BZ2 y XZ (RAR 5 e ISO no son compatibles)",
+                    "Vista del contenido del archivo comprimido para elegir qué extraer, con carpeta de destino, contraseña y manejo de archivos que ya existen",
+                    "Comprimir archivos o una carpeta en ZIP, con progreso y opción de cancelar",
+                    "Instalar APK con el instalador oficial de Android; si falta el permiso, Nexora te lleva a la configuración")),
+                Seccion("Correcciones", listOf(
+                    "El orden elegido ahora tiene una copia de seguridad que se recupera si los datos de la app se borran",
+                    "Los paquetes XAPK, APKS y APKM ya no se tratan como APK individuales"))))
     )
 
     private val pendientes = listOf(
@@ -302,7 +313,9 @@ class MainActivity : Activity() {
         "PDF a Word y otros documentos: no se puede conservar el formato con las herramientas actuales.",
         "Mejorar imágenes: una imagen a la vez; entrada de hasta 1 MP en 4× y 2 MP en 2× (las fotos más grandes se reducen antes de mejorarlas); se procesa en el procesador del teléfono, sin GPU.",
         "Vista en cuadrícula: aún no existe.",
-        "Extraer RAR y 7z: por ahora solo se extraen ZIP.",
+        "RAR 5 e ISO: no se pueden extraer sin una biblioteca adicional.",
+        "Paquetes divididos (XAPK, APKS): se pueden extraer, pero no instalar desde Nexora.",
+        "Comprimir: por ahora solo se crea ZIP; 7z y TAR quedan para más adelante.",
         "Limpiar: los resultados se guardan solo mientras la app está abierta y se vuelven a calcular al actualizar.",
         "Fotos parecidas: no se detectan; compararlas visualmente requeriría una biblioteca adicional.",
         "Android/data y Android/obb: desde Android 11 el sistema bloquea su lectura a todas las apps normales; abrirlas requeriría un método avanzado (por ejemplo Shizuku)."
@@ -415,12 +428,14 @@ class MainActivity : Activity() {
         loadTheme()
         root = Environment.getExternalStorageDirectory()
         dir = root
+        registerInstallReceiver()
         Thread { trimCache() }.start()
     }
 
     override fun onResume() {
         super.onResume()
         if (hasAccess()) {
+            if (!sortRestored) restoreSortBackup()
             if (!root.exists()) {
                 root = Environment.getExternalStorageDirectory()
                 rootName = "Almacenamiento interno"
@@ -1066,7 +1081,7 @@ class MainActivity : Activity() {
             "mp4", "mkv", "webm", "3gp", "mov", "avi", "m4v" -> 2
             "mp3", "m4a", "wav", "ogg", "flac", "aac", "opus", "amr" -> 3
             "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "odt", "csv", "epub", "md" -> 4
-            "zip", "rar", "7z", "tar", "gz", "tgz", "bz2" -> 5
+            "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "tbz2", "tbz", "txz" -> 5
             "apk", "xapk", "apks" -> 6
             else -> {
                 val m = if (e.isEmpty()) null else MimeTypeMap.getSingleton().getMimeTypeFromExtension(e)
@@ -1394,7 +1409,9 @@ class MainActivity : Activity() {
         val ext = f0.extension.lowercase()
         val previewable = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "mp4", "mkv", "webm", "3gp", "mov", "pdf")
         if (one && ext in previewable) out.add(MEntry(4, "Abrir", false, 0, false) { tap(f0) })
-        if (one && ext == "zip") out.add(MEntry(12, "Extraer aquí", false, 0, false) { confirmSheet("¿Extraer " + f0.name + "?", "", "Extraer") { extract(f0) } })
+        if (one && arcFormat(f0) != null) out.add(MEntry(12, "Extraer", false, 0, false) { openArchive(f0) })
+        if (one && ext == "apk") out.add(MEntry(12, "Instalar", false, 0, false) { apkSheet(f0) })
+        out.add(MEntry(24, "Comprimir en ZIP", false, 1, false) { zipSheet(files) })
         out.add(MEntry(5, "Compartir", false, 0, false) { shareFiles(files) })
         out.add(MEntry(6, "Copiar a…", false, 1, false) { chooseDest(files, false) })
         out.add(MEntry(7, "Mover a…", false, 1, false) { chooseDest(files, true) })
@@ -1414,6 +1431,7 @@ class MainActivity : Activity() {
             refresh()
         },
         MEntry(8, "Renombrar", false, 1, false) { rename(f) },
+        MEntry(24, "Comprimir en ZIP", false, 1, false) { zipSheet(listOf(f)) },
         MEntry(11, "Eliminar carpeta", true, 2, false) {
             confirmSheet("¿Eliminar la carpeta " + f.name + "?", "Se borrará con todo lo que contiene. Esta acción no se puede deshacer.", "Eliminar") {
                 toast("Eliminando…")
@@ -3747,7 +3765,9 @@ class MainActivity : Activity() {
             "jpg", "jpeg", "png", "webp", "gif", "bmp" -> viewImage(f)
             "mp4", "mkv", "webm", "3gp", "mov" -> viewVideo(f)
             "pdf" -> viewPdf(f)
-            "zip" -> confirmSheet("¿Extraer " + f.name + "?", "", "Extraer") { extract(f) }
+            "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "tbz2", "tbz", "xz", "txz", "xapk", "apks", "apkm" -> openArchive(f)
+            "apk" -> apkSheet(f)
+            "iso" -> toast("Los archivos ISO todavía no se pueden extraer desde Nexora")
             else -> toast("Todavía no hay vista previa para este tipo de archivo")
         }
     }
@@ -3778,37 +3798,6 @@ class MainActivity : Activity() {
             col.addView(row, lp(-1, -2).also { it.topMargin = dp(16) })
             col
         }
-    }
-
-    private fun extract(f: File) {
-        toast("Extrayendo…")
-        Thread {
-            try {
-                val out = File(f.parentFile, f.nameWithoutExtension)
-                out.mkdirs()
-                val base = out.canonicalPath
-                ZipInputStream(f.inputStream().buffered()).use { z ->
-                    var e = z.nextEntry
-                    while (e != null) {
-                        val t = File(out, e.name)
-                        if (!t.canonicalPath.startsWith(base)) throw Exception("ruta no válida")
-                        if (e.isDirectory) {
-                            t.mkdirs()
-                        } else {
-                            t.parentFile?.mkdirs()
-                            t.outputStream().use { o -> z.copyTo(o) }
-                        }
-                        e = z.nextEntry
-                    }
-                }
-                runOnUiThread {
-                    toast("Extraído en " + out.name)
-                    if (!inViewer) refresh()
-                }
-            } catch (ex: Exception) {
-                runOnUiThread { toast("No se pudo extraer: " + ex.message) }
-            }
-        }.start()
     }
 
     // ---------- imagen de fondo propia ----------
@@ -4949,13 +4938,1064 @@ class MainActivity : Activity() {
         return row
     }
 
-    private fun saveSort() {
-        prefs.edit().putInt("sort", sortIdx).putBoolean("folders", foldersFirst).commit()
+    // ---------- Orden: copia de seguridad ----------
+    private var sortRestored = false
+
+    private fun sortBackupFile(): File = File(Environment.getExternalStorageDirectory(), ".nexora/orden.cfg")
+
+    private fun writeSortBackup() {
+        try {
+            val f = sortBackupFile()
+            f.parentFile?.mkdirs()
+            f.writeText("sort=" + sortIdx + "\nfolders=" + (if (foldersFirst) 1 else 0) + "\n")
+        } catch (e: Exception) {
+        }
     }
 
-    override fun onPause() {
-        super.onPause()
-        if (sortReady) saveSort()
+    private fun restoreSortBackup() {
+        sortRestored = true
+        if (prefs.contains("sort")) return
+        try {
+            val f = sortBackupFile()
+            if (!f.isFile) return
+            var s = -1
+            var fo = -1
+            for (ln in f.readLines()) {
+                if (ln.startsWith("sort=")) s = ln.substring(5).trim().toIntOrNull() ?: -1
+                if (ln.startsWith("folders=")) fo = ln.substring(8).trim().toIntOrNull() ?: -1
+            }
+            if (s >= 0 && s < SORTS.size) {
+                sortIdx = s
+                if (fo >= 0) foldersFirst = fo == 1
+                prefs.edit().putInt("sort", sortIdx).putBoolean("folders", foldersFirst).commit()
+            }
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun saveSort() {
+        prefs.edit().putInt("sort", sortIdx).putBoolean("folders", foldersFirst).commit()
+        writeSortBackup()
+    }
+
+    // ---------- Instalación de APK ----------
+    private val installAction = "com.gestor.archivos.INSTALL_RESULT"
+    private var installReceiver: android.content.BroadcastReceiver? = null
+    private var installingName = ""
+
+    private fun registerInstallReceiver() {
+        if (installReceiver != null) return
+        val r = object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                onInstallResult(i)
+            }
+        }
+        val flt = android.content.IntentFilter(installAction)
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(r, flt, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(r, flt)
+        installReceiver = r
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        val r = installReceiver
+        if (r != null) {
+            try {
+                unregisterReceiver(r)
+            } catch (e: Exception) {
+            }
+            installReceiver = null
+        }
+    }
+
+    private fun onInstallResult(i: Intent) {
+        val st = i.getIntExtra(android.content.pm.PackageInstaller.EXTRA_STATUS, -999)
+        val msg = i.getStringExtra(android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE) ?: ""
+        if (st == android.content.pm.PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            @Suppress("DEPRECATION")
+            val conf = i.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+            if (conf != null) {
+                conf.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                try {
+                    startActivity(conf)
+                } catch (e: Exception) {
+                    toast("No se pudo abrir el instalador de Android")
+                }
+            } else {
+                toast("Android no devolvió la pantalla de confirmación")
+            }
+        } else if (st == android.content.pm.PackageInstaller.STATUS_SUCCESS) {
+            toast("Instalación completada: " + installingName)
+        } else {
+            toast(installErrorText(st, msg))
+        }
+    }
+
+    private fun installErrorText(st: Int, msg: String): String {
+        return if (st == android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED) "Instalación cancelada."
+        else if (st == android.content.pm.PackageInstaller.STATUS_FAILURE_BLOCKED) "Android bloqueó la instalación. Revisa el permiso para instalar apps desconocidas, Play Protect o las restricciones del dispositivo."
+        else if (st == android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT) "Conflicto: ya hay una app con el mismo nombre pero otra firma, o una versión más nueva. Desinstala la actual si quieres reemplazarla."
+        else if (st == android.content.pm.PackageInstaller.STATUS_FAILURE_INCOMPATIBLE) "El APK no es compatible con este dispositivo (versión de Android o arquitectura)."
+        else if (st == android.content.pm.PackageInstaller.STATUS_FAILURE_INVALID) "El archivo APK no es válido o está dañado, o es parte de un paquete dividido."
+        else if (st == android.content.pm.PackageInstaller.STATUS_FAILURE_STORAGE) "No hay espacio suficiente para instalar la aplicación."
+        else "No se pudo instalar" + (if (msg.isEmpty()) "." else ": " + msg)
+    }
+
+    private fun askInstallPermission() {
+        confirmSheet("Permitir instalar desde Nexora", "Para instalar aplicaciones, Android pide que autorices a Nexora. Se abrirá la configuración: activa «Permitir de esta fuente» y vuelve a Nexora.", "Abrir ajustes") {
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + packageName)))
+            } catch (e: Exception) {
+                toast("Abre Ajustes, Aplicaciones, Nexora y activa «Instalar apps desconocidas».")
+            }
+        }
+    }
+
+    private fun installApk(f: File) {
+        if (!f.isFile || !f.canRead()) {
+            toast("No se puede leer el archivo APK")
+            return
+        }
+        if (!packageManager.canRequestPackageInstalls()) {
+            askInstallPermission()
+            return
+        }
+        registerInstallReceiver()
+        installingName = f.name
+        toast("Preparando la instalación…")
+        Thread {
+            var err: String? = null
+            try {
+                val pin = packageManager.packageInstaller
+                val params = android.content.pm.PackageInstaller.SessionParams(android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+                params.setSize(f.length())
+                val id = pin.createSession(params)
+                val session = pin.openSession(id)
+                try {
+                    FileInputStream(f).use { ins ->
+                        session.openWrite("base.apk", 0L, f.length()).use { out ->
+                            ins.copyTo(out, 65536)
+                            session.fsync(out)
+                        }
+                    }
+                    val ri = Intent(installAction)
+                    ri.setPackage(packageName)
+                    val flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) android.app.PendingIntent.FLAG_MUTABLE else 0)
+                    val pend = android.app.PendingIntent.getBroadcast(this, id, ri, flags)
+                    session.commit(pend.intentSender)
+                } catch (e: Exception) {
+                    try {
+                        session.abandon()
+                    } catch (e2: Exception) {
+                    }
+                    throw e
+                } finally {
+                    session.close()
+                }
+            } catch (e: Exception) {
+                err = "No se pudo preparar la instalación: " + (e.message ?: e.javaClass.simpleName)
+            }
+            val er = err
+            if (er != null) runOnUiThread { toast(er) }
+        }.start()
+    }
+
+    private fun apkSheet(f: File) {
+        val pm = packageManager
+        val info = try {
+            pm.getPackageArchiveInfo(f.absolutePath, 0)
+        } catch (e: Exception) {
+            null
+        }
+        var label = f.name
+        var detail = ""
+        var blocker: String? = null
+        if (info == null) {
+            blocker = "Este archivo no parece un APK válido: puede estar dañado, incompleto o ser solo una parte de un paquete dividido. Nexora no lo instalará."
+        } else {
+            val ai = info.applicationInfo
+            if (ai != null) {
+                ai.sourceDir = f.absolutePath
+                ai.publicSourceDir = f.absolutePath
+                try {
+                    label = ai.loadLabel(pm).toString()
+                } catch (e: Exception) {
+                }
+                if (ai.minSdkVersion > Build.VERSION.SDK_INT) {
+                    blocker = "Esta app necesita una versión de Android más nueva (API " + ai.minSdkVersion + ") que la de tu teléfono (API " + Build.VERSION.SDK_INT + ")."
+                }
+            }
+            detail = info.packageName + " · versión " + (info.versionName ?: "desconocida")
+        }
+        val bl = blocker
+        val lb = label
+        val dt = detail
+        showSheet(false) { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt("Instalar aplicación", 18f, TXT, true))
+            col.addView(txt(lb, 15f, TXT, true), lp(-1, -2).also { it.topMargin = dp(10) })
+            if (dt.isNotEmpty()) col.addView(txt(dt, 12f, MUTE))
+            col.addView(txt(f.name + " · " + fmtS(f.length()), 12f, MUTE))
+            if (bl != null) {
+                col.addView(txt(bl, 13f, AMBER), lp(-1, -2).also { it.topMargin = dp(12) })
+            } else {
+                col.addView(txt("Android te mostrará su propia pantalla para confirmar la instalación.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(12) })
+            }
+            val row = LinearLayout(this)
+            val no = ghostButton(if (bl != null) "Cerrar" else "Cancelar")
+            no.setOnClickListener { d.dismiss() }
+            row.addView(no, lp(0, dp(48), 1f))
+            if (bl == null) {
+                val yes = primaryButton("Instalar")
+                yes.setOnClickListener {
+                    d.dismiss()
+                    installApk(f)
+                }
+                row.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+            }
+            col.addView(row, lp(-1, -2).also { it.topMargin = dp(16) })
+            col
+        }
+    }
+
+    // ---------- Archivos comprimidos ----------
+    private var arcFile: File? = null
+    private var arcFmt = ""
+    private var arcEntries: List<ArcEntry> = emptyList()
+    private val arcSel = HashSet<Int>()
+    private var arcPwd: String? = null
+    private var arcAdapter: BaseAdapter? = null
+    private var arcCountBtn: TextView? = null
+    @Volatile private var arcCancel = false
+    @Volatile private var arcBusy = false
+
+    private fun arcFormat(f: File): String? {
+        val n = f.name.lowercase()
+        return if (n.endsWith(".tar.gz") || n.endsWith(".tgz")) "tgz"
+        else if (n.endsWith(".tar.bz2") || n.endsWith(".tbz2") || n.endsWith(".tbz")) "tbz2"
+        else if (n.endsWith(".tar.xz") || n.endsWith(".txz")) "txz"
+        else if (n.endsWith(".zip") || n.endsWith(".xapk") || n.endsWith(".apks") || n.endsWith(".apkm")) "zip"
+        else if (n.endsWith(".rar")) "rar"
+        else if (n.endsWith(".7z")) "7z"
+        else if (n.endsWith(".tar")) "tar"
+        else if (n.endsWith(".gz")) "gz"
+        else if (n.endsWith(".bz2")) "bz2"
+        else if (n.endsWith(".xz")) "xz"
+        else null
+    }
+
+    private fun arcLabel(fmt: String): String = when (fmt) {
+        "tgz" -> "TAR.GZ"
+        "tbz2" -> "TAR.BZ2"
+        "txz" -> "TAR.XZ"
+        else -> fmt.uppercase()
+    }
+
+    private fun arcBaseName(f: File): String {
+        val n = f.name
+        val l = n.lowercase()
+        for (s in listOf(".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz2", ".tbz", ".txz")) {
+            if (l.endsWith(s)) return n.substring(0, n.length - s.length)
+        }
+        val b = n.substringBeforeLast('.')
+        return if (b.isEmpty()) n else b
+    }
+
+    private fun arcStream(f: File, fmt: String): java.io.InputStream {
+        val raw = java.io.BufferedInputStream(FileInputStream(f), 65536)
+        try {
+            return when (fmt) {
+                "tgz", "gz" -> java.util.zip.GZIPInputStream(raw, 65536)
+                "tbz2", "bz2" -> org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream(raw)
+                "txz", "xz" -> org.apache.commons.compress.compressors.xz.XZCompressorInputStream(raw)
+                else -> raw
+            }
+        } catch (e: Exception) {
+            try {
+                raw.close()
+            } catch (e2: Exception) {
+            }
+            throw e
+        }
+    }
+
+    private fun arcError(e: Throwable, fmt: String): String {
+        val l = arcChain(e)
+        return if (l.contains("enospc") || l.contains("no space left")) "No hay espacio suficiente en el destino."
+        else if (l.contains("eacces") || l.contains("permission denied") || l.contains("read-only")) "Android no permite escribir en esa carpeta."
+        else if (l.contains("password")) "La contraseña es incorrecta o falta."
+        else if (fmt == "rar" && l.contains("v5")) "Este RAR usa la versión 5, que Nexora todavía no puede abrir."
+        else if (l.contains("unsupported") || l.contains("not supported")) "Este archivo usa un método de compresión que Nexora no admite."
+        else "El archivo está dañado, incompleto o no es del formato indicado. (" + (e.message ?: e.javaClass.simpleName) + ")"
+    }
+
+    private fun arcChain(e: Throwable): String {
+        var m = ""
+        var x: Throwable? = e
+        var n = 0
+        while (x != null && n < 8) {
+            m += " " + (x.message ?: "") + " " + x.javaClass.simpleName
+            x = x.cause
+            n++
+        }
+        return m.lowercase()
+    }
+
+    private fun arcList(f: File, fmt: String, pwd: String?, stop: () -> Boolean): List<ArcEntry> {
+        val out = ArrayList<ArcEntry>()
+        if (fmt == "zip") {
+            val z = net.lingala.zip4j.ZipFile(f)
+            if (!z.isValidZipFile) throw Exception("El archivo está dañado o no es un ZIP válido")
+            if (z.isEncrypted && pwd == null) throw NeedPwd()
+            for ((i, h) in z.fileHeaders.withIndex()) out.add(ArcEntry((h.fileName ?: "").replace('\\', '/'), h.isDirectory, h.uncompressedSize, i))
+        } else if (fmt == "7z") {
+            try {
+                val sz = if (pwd != null) org.apache.commons.compress.archivers.sevenz.SevenZFile(f, pwd.toCharArray()) else org.apache.commons.compress.archivers.sevenz.SevenZFile(f)
+                sz.use { s ->
+                    for ((i, e) in s.entries.withIndex()) out.add(ArcEntry((e.name ?: "").replace('\\', '/'), e.isDirectory, e.size, i))
+                }
+            } catch (e: org.apache.commons.compress.PasswordRequiredException) {
+                throw NeedPwd()
+            }
+        } else if (fmt == "rar") {
+            try {
+                val a = if (pwd != null) com.github.junrar.Archive(f, pwd) else com.github.junrar.Archive(f)
+                a.use { ar ->
+                    val hs = ar.fileHeaders
+                    if (pwd == null && hs.any { it.isEncrypted }) throw NeedPwd()
+                    for ((i, h) in hs.withIndex()) out.add(ArcEntry((h.fileName ?: "").replace('\\', '/'), h.isDirectory, h.fullUnpackSize, i))
+                }
+            } catch (e: NeedPwd) {
+                throw e
+            } catch (e: Exception) {
+                if (arcChain(e).contains("password")) throw NeedPwd()
+                throw e
+            }
+        } else if (fmt == "tar" || fmt == "tgz" || fmt == "tbz2" || fmt == "txz") {
+            arcStream(f, fmt).use { raw ->
+                org.apache.commons.compress.archivers.tar.TarArchiveInputStream(raw).use { tar ->
+                    var i = 0
+                    while (true) {
+                        if (stop()) throw ArcCancel()
+                        val e = tar.nextEntry ?: break
+                        out.add(ArcEntry((e.name ?: "").replace('\\', '/'), e.isDirectory, e.size, i))
+                        i++
+                    }
+                }
+            }
+        } else {
+            arcStream(f, fmt).use { ins -> ins.read() }
+            out.add(ArcEntry(arcBaseName(f).ifEmpty { f.name + ".out" }, false, -1L, 0))
+        }
+        return out
+    }
+
+    private fun safeTarget(dest: File, name: String): File? {
+        val n = name.replace('\\', '/').trimStart('/')
+        if (n.isEmpty()) return null
+        if (n.split('/').any { it == ".." }) return null
+        val t = File(dest, n)
+        val base = dest.canonicalPath
+        val cp = t.canonicalPath
+        return if (cp == base || cp.startsWith(base + File.separator)) t else null
+    }
+
+    private fun uniqueFile(t: File): File {
+        val base = t.nameWithoutExtension
+        val ext = t.extension
+        var i = 1
+        var c = File(t.parentFile, base + " (" + i + ")" + (if (ext.isEmpty()) "" else "." + ext))
+        while (c.exists()) {
+            i++
+            c = File(t.parentFile, base + " (" + i + ")" + (if (ext.isEmpty()) "" else "." + ext))
+        }
+        return c
+    }
+
+    private fun arcWriteFile(t0: File, policy: Int, tick: (Long) -> Unit, writer: (java.io.OutputStream) -> Unit): Int {
+        var t = t0
+        if (t.exists()) {
+            if (t.isDirectory) return -1
+            if (policy == 1) return 0
+            if (policy == 2) t = uniqueFile(t)
+        }
+        t.parentFile?.mkdirs()
+        val tmp = File(t.parentFile, t.name + ".nexora-part")
+        try {
+            FileOutputStream(tmp).use { fo -> writer(ArcPO(java.io.BufferedOutputStream(fo, 65536), tick) { arcCancel }) }
+        } catch (e: Throwable) {
+            tmp.delete()
+            throw e
+        }
+        if (t.exists() && !t.delete()) {
+            tmp.delete()
+            return -1
+        }
+        return if (tmp.renameTo(t)) 1 else {
+            tmp.delete()
+            -1
+        }
+    }
+
+    private fun arcRun(f: File, fmt: String, pwd: String?, sel: Set<Int>, dest: File, policy: Int, ui: (String, Long) -> Unit): ArcOut {
+        var ok = 0
+        var skipped = 0
+        var unsafe = 0
+        var bytes = 0L
+        var curName = ""
+        var last = 0L
+        fun tick(n: Long) {
+            bytes += n
+            val now = System.currentTimeMillis()
+            if (now - last > 150L) {
+                last = now
+                ui(curName, bytes)
+            }
+        }
+        fun handle(name: String, isDir: Boolean, writer: (java.io.OutputStream) -> Unit) {
+            ui(name, bytes)
+            val t = safeTarget(dest, name)
+            if (t == null) {
+                unsafe++
+                return
+            }
+            if (isDir) {
+                t.mkdirs()
+                return
+            }
+            val r = arcWriteFile(t, policy, { n -> tick(n) }, writer)
+            if (r == 1) ok++ else if (r == 0) skipped++ else throw Exception("No se pudo escribir " + t.name)
+        }
+        try {
+            if (!dest.exists() && !dest.mkdirs()) throw Exception("No se pudo crear la carpeta de destino (permission denied)")
+            if (fmt == "zip") {
+                val z = net.lingala.zip4j.ZipFile(f)
+                if (pwd != null) z.setPassword(pwd.toCharArray())
+                for ((i, h) in z.fileHeaders.withIndex()) {
+                    if (!sel.contains(i)) continue
+                    if (arcCancel) throw ArcCancel()
+                    curName = (h.fileName ?: "").replace('\\', '/')
+                    if (h.isDirectory) {
+                        handle(curName, true) { }
+                    } else {
+                        z.getInputStream(h).use { ins -> handle(curName, false) { o -> ins.copyTo(o, 65536) } }
+                    }
+                }
+            } else if (fmt == "7z") {
+                val sz = if (pwd != null) org.apache.commons.compress.archivers.sevenz.SevenZFile(f, pwd.toCharArray()) else org.apache.commons.compress.archivers.sevenz.SevenZFile(f)
+                sz.use { s ->
+                    var i = 0
+                    while (true) {
+                        val e = s.nextEntry ?: break
+                        val idx = i
+                        i++
+                        if (!sel.contains(idx)) continue
+                        if (arcCancel) throw ArcCancel()
+                        curName = (e.name ?: "").replace('\\', '/')
+                        if (e.isDirectory) {
+                            handle(curName, true) { }
+                        } else {
+                            handle(curName, false) { o -> SevenZStream(s).copyTo(o, 65536) }
+                        }
+                    }
+                }
+            } else if (fmt == "rar") {
+                val a = if (pwd != null) com.github.junrar.Archive(f, pwd) else com.github.junrar.Archive(f)
+                a.use { ar ->
+                    for ((i, h) in ar.fileHeaders.withIndex()) {
+                        if (!sel.contains(i)) continue
+                        if (arcCancel) throw ArcCancel()
+                        curName = (h.fileName ?: "").replace('\\', '/')
+                        if (h.isDirectory) {
+                            handle(curName, true) { }
+                        } else {
+                            handle(curName, false) { o -> ar.extractFile(h, o) }
+                        }
+                    }
+                }
+            } else if (fmt == "tar" || fmt == "tgz" || fmt == "tbz2" || fmt == "txz") {
+                arcStream(f, fmt).use { raw ->
+                    org.apache.commons.compress.archivers.tar.TarArchiveInputStream(raw).use { tar ->
+                        var i = 0
+                        while (true) {
+                            val e = tar.nextEntry ?: break
+                            val idx = i
+                            i++
+                            if (!sel.contains(idx)) continue
+                            if (arcCancel) throw ArcCancel()
+                            curName = (e.name ?: "").replace('\\', '/')
+                            if (e.isSymbolicLink || e.isLink) {
+                                skipped++
+                                continue
+                            }
+                            if (e.isDirectory) {
+                                handle(curName, true) { }
+                            } else {
+                                handle(curName, false) { o -> tar.copyTo(o, 65536) }
+                            }
+                        }
+                    }
+                }
+            } else {
+                arcStream(f, fmt).use { ins ->
+                    curName = arcBaseName(f).ifEmpty { f.name + ".out" }
+                    handle(curName, false) { o -> ins.copyTo(o, 65536) }
+                }
+            }
+        } catch (e: ArcCancel) {
+            return ArcOut(ok, skipped, unsafe, true, false, null, bytes)
+        } catch (e: NeedPwd) {
+            return ArcOut(ok, skipped, unsafe, false, true, null, bytes)
+        } catch (e: Throwable) {
+            val l = arcChain(e)
+            val np = l.contains("password") || l.contains("passwordrequired")
+            return ArcOut(ok, skipped, unsafe, false, np, arcError(e, fmt), bytes)
+        }
+        return ArcOut(ok, skipped, unsafe, false, false, null, bytes)
+    }
+
+    private fun progressDialog(title: String, onCancel: () -> Unit): ProgUi {
+        val nt = txt("Preparando…", 13f, MUTE)
+        nt.isSingleLine = true
+        nt.ellipsize = TextUtils.TruncateAt.MIDDLE
+        val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+        pb.max = 1000
+        pb.isIndeterminate = true
+        val pt = txt("", 12f, MUTE)
+        val d = showSheet(false) { _ ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt(title, 18f, TXT, true))
+            col.addView(nt, lp(-1, -2).also { it.topMargin = dp(12) })
+            col.addView(pb, lp(-1, dp(14)).also { it.topMargin = dp(10) })
+            col.addView(pt, lp(-1, -2).also { it.topMargin = dp(6) })
+            val cancel = ghostButton("Cancelar")
+            cancel.setOnClickListener {
+                onCancel()
+                cancel.isEnabled = false
+                cancel.text = "Cancelando…"
+            }
+            col.addView(cancel, lp(-1, dp(46)).also { it.topMargin = dp(14) })
+            col
+        }
+        d.setCancelable(false)
+        d.setCanceledOnTouchOutside(false)
+        return ProgUi(d, nt, pb, pt) { fmtS(it) }
+    }
+
+    private fun openArchive(f: File) {
+        val fmt = arcFormat(f)
+        if (fmt == null) {
+            toast("Este formato no es compatible todavía")
+            return
+        }
+        arcFile = f
+        arcFmt = fmt
+        arcPwd = null
+        arcSel.clear()
+        arcEntries = emptyList()
+        arcLoad()
+    }
+
+    private fun arcLoad() {
+        val f = arcFile ?: return
+        val fmt = arcFmt
+        val pwd = arcPwd
+        val b = body()
+        b.addView(txt("Leyendo " + f.name + "…", 14f, TXT))
+        val pb = ProgressBar(this)
+        pb.isIndeterminate = true
+        b.addView(pb, lp(dp(36), dp(36)).also { it.topMargin = dp(16) })
+        page("Archivo comprimido", b)
+        val my = token
+        Thread {
+            var list: List<ArcEntry>? = null
+            var needPwd = false
+            var err: String? = null
+            try {
+                list = arcList(f, fmt, pwd) { token != my }
+            } catch (e: NeedPwd) {
+                needPwd = true
+            } catch (e: ArcCancel) {
+                err = null
+            } catch (e: Throwable) {
+                err = arcError(e, fmt)
+            }
+            val l = list
+            val np = needPwd
+            val er = err
+            runOnUiThread {
+                if (token == my) {
+                    if (np) {
+                        arcAskPassword(false, { p ->
+                            arcPwd = p
+                            arcLoad()
+                        }, { closeViewer() })
+                    } else if (er != null) {
+                        arcFail(er)
+                    } else if (l != null) {
+                        arcEntries = l
+                        arcSel.clear()
+                        for (e in l) arcSel.add(e.idx)
+                        arcShowList()
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun arcFail(msg: String) {
+        val b = body()
+        val c0 = cardBox()
+        c0.addView(txt("No se pudo abrir el archivo", 16f, TXT, true))
+        c0.addView(txt(msg, 13f, AMBER), lp(-1, -2).also { it.topMargin = dp(8) })
+        b.addView(c0, lp(-1, -2))
+        page("Archivo comprimido", b)
+    }
+
+    private fun arcAskPassword(wrong: Boolean, onOk: (String) -> Unit, onCancel: () -> Unit) {
+        showSheet(false) { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt("Archivo protegido", 18f, TXT, true))
+            col.addView(txt(if (wrong) "La contraseña no funcionó. Inténtalo de nuevo." else "Escribe la contraseña para abrir este archivo.", 13f, if (wrong) AMBER else MUTE), lp(-1, -2).also { it.topMargin = dp(6) })
+            val et = EditText(this)
+            et.hint = "Contraseña"
+            et.setHintTextColor(MUTE)
+            et.setTextColor(TXT)
+            et.typeface = face(false)
+            et.isSingleLine = true
+            et.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            et.background = rounded(alpha(Color.WHITE, 0x14), 12)
+            et.setPadding(dp(14), dp(12), dp(14), dp(12))
+            col.addView(et, lp(-1, -2).also { it.topMargin = dp(12) })
+            val row = LinearLayout(this)
+            val no = ghostButton("Cancelar")
+            no.setOnClickListener {
+                d.dismiss()
+                onCancel()
+            }
+            val yes = primaryButton("Aceptar")
+            yes.setOnClickListener {
+                val p = et.text.toString()
+                d.dismiss()
+                onOk(p)
+            }
+            row.addView(no, lp(0, dp(48), 1f))
+            row.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+            col.addView(row, lp(-1, -2).also { it.topMargin = dp(16) })
+            col
+        }
+    }
+
+    private fun arcUpdateCount() {
+        val n = arcEntries.count { arcSel.contains(it.idx) && !it.isDir }
+        arcCountBtn?.text = "Extraer (" + n + ")"
+        arcCountBtn?.isEnabled = arcSel.isNotEmpty()
+    }
+
+    private fun arcToggle(e: ArcEntry) {
+        val on = !arcSel.contains(e.idx)
+        if (e.isDir) {
+            val pre = e.name.trimEnd('/') + "/"
+            for (x in arcEntries) {
+                if (x.name.startsWith(pre)) {
+                    if (on) arcSel.add(x.idx) else arcSel.remove(x.idx)
+                }
+            }
+        }
+        if (on) arcSel.add(e.idx) else arcSel.remove(e.idx)
+        arcAdapter?.notifyDataSetChanged()
+        arcUpdateCount()
+    }
+
+    private fun arcShowList() {
+        val f = arcFile ?: return
+        val head = body()
+        val card = cardBox()
+        card.addView(txt(f.name, 15f, TXT, true))
+        var total = 0L
+        var files = 0
+        for (e in arcEntries) {
+            if (!e.isDir) {
+                files++
+                if (e.size > 0L) total += e.size
+            }
+        }
+        card.addView(txt(arcLabel(arcFmt) + " · " + files + " archivos" + (if (total > 0L) " · " + fmtS(total) + " descomprimido" else ""), 12f, MUTE))
+        val ext = f.extension.lowercase()
+        if (ext == "xapk" || ext == "apks" || ext == "apkm") {
+            card.addView(txt("Paquete de instalación dividido: Nexora puede extraerlo, pero no instalarlo directamente.", 12f, AMBER), lp(-1, -2).also { it.topMargin = dp(6) })
+        }
+        head.addView(card, lp(-1, -2))
+        val tg = txt("Seleccionar todo o ninguno", 13f, ACC2, true)
+        tg.setPadding(dp(4), dp(10), dp(4), dp(4))
+        tg.setOnClickListener {
+            if (arcSel.size >= arcEntries.size) arcSel.clear() else for (e in arcEntries) arcSel.add(e.idx)
+            arcAdapter?.notifyDataSetChanged()
+            arcUpdateCount()
+        }
+        head.addView(tg, lp(-2, -2))
+
+        val lv = ListView(this)
+        lv.divider = null
+        lv.dividerHeight = 0
+        val ad = object : BaseAdapter() {
+            override fun getCount(): Int = arcEntries.size
+            override fun getItem(position: Int): Any = arcEntries[position]
+            override fun getItemId(position: Int): Long = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                val e = arcEntries[position]
+                val row = LinearLayout(this@MainActivity)
+                row.gravity = Gravity.CENTER_VERTICAL
+                row.setPadding(dp(14), dp(2), dp(14), dp(2))
+                row.addView(checkBox(arcSel.contains(e.idx)) { arcToggle(e) })
+                val col = LinearLayout(this@MainActivity)
+                col.orientation = LinearLayout.VERTICAL
+                col.setPadding(dp(4), dp(6), 0, dp(6))
+                val nt = txt(e.name, 14f, TXT, !e.isDir)
+                nt.isSingleLine = true
+                nt.ellipsize = TextUtils.TruncateAt.MIDDLE
+                col.addView(nt)
+                col.addView(txt(if (e.isDir) "Carpeta" else if (e.size >= 0L) fmtS(e.size) else "Tamaño desconocido", 11f, MUTE))
+                col.setOnClickListener { arcToggle(e) }
+                row.addView(col, lp(0, -2, 1f))
+                return row
+            }
+        }
+        arcAdapter = ad
+        lv.adapter = ad
+
+        val bar = LinearLayout(this)
+        bar.setPadding(dp(14), dp(8), dp(14), dp(10))
+        val no = ghostButton("Cerrar")
+        no.setOnClickListener { closeViewer() }
+        val go = primaryButton("Extraer")
+        go.setOnClickListener { arcChooseDest() }
+        arcCountBtn = go
+        bar.addView(no, lp(0, dp(48), 1f))
+        bar.addView(go, lp(0, dp(48), 1.4f).also { it.leftMargin = dp(10) })
+
+        val frame = LinearLayout(this)
+        frame.orientation = LinearLayout.VERTICAL
+        frame.addView(head, lp(-1, -2))
+        frame.addView(lv, lp(-1, 0, 1f))
+        frame.addView(bar, lp(-1, -2))
+        pageFixed("Archivo comprimido", frame)
+        arcUpdateCount()
+    }
+
+    private fun arcChooseDest() {
+        val f = arcFile ?: return
+        val par = f.parentFile ?: return
+        if (arcSel.isEmpty()) return
+        val base = arcBaseName(f)
+        showSheet { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt("Extraer en", 18f, TXT, true))
+            val r1 = optionRow("Esta carpeta (" + relPath(par) + ")", false)
+            r1.setOnClickListener {
+                d.dismiss()
+                arcPrepare(par)
+            }
+            col.addView(r1, lp(-1, -2).also { it.topMargin = dp(8) })
+            val r2 = optionRow("Crear la carpeta «" + base + "»", false)
+            r2.setOnClickListener {
+                d.dismiss()
+                arcPrepare(File(par, base))
+            }
+            col.addView(r2, lp(-1, -2).also { it.topMargin = dp(4) })
+            val r3 = optionRow("Elegir otra carpeta…", false)
+            r3.setOnClickListener {
+                d.dismiss()
+                pickFolder("Carpeta de destino", "Extraer aquí", par) { dd ->
+                    arcPrepare(dd)
+                    true
+                }
+            }
+            col.addView(r3, lp(-1, -2).also { it.topMargin = dp(4) })
+            col
+        }
+    }
+
+    private fun arcPrepare(dest: File) {
+        if (arcFile == null || arcBusy) return
+        val sel = HashSet<Int>(arcSel)
+        val ents = arcEntries
+        Thread {
+            var total = 0L
+            var conflicts = 0
+            for (e in ents) {
+                if (!sel.contains(e.idx) || e.isDir) continue
+                if (e.size > 0L) total += e.size
+                val t = safeTarget(dest, e.name)
+                if (t != null && t.exists() && !t.isDirectory) conflicts++
+            }
+            var ex: File? = dest
+            while (ex != null && !ex.exists()) ex = ex.parentFile
+            val free = if (ex != null) ex.usableSpace else Long.MAX_VALUE
+            val tt = total
+            val cc = conflicts
+            runOnUiThread {
+                if (tt > free) {
+                    toast("No hay espacio suficiente: se necesitan " + fmtS(tt) + " y hay " + fmtS(free))
+                } else if (cc > 0) {
+                    arcConflictSheet(dest, cc, tt)
+                } else {
+                    arcStart(dest, 0, tt)
+                }
+            }
+        }.start()
+    }
+
+    private fun arcConflictSheet(dest: File, n: Int, total: Long) {
+        showSheet { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt(n.toString() + (if (n == 1) " archivo ya existe" else " archivos ya existen"), 18f, TXT, true))
+            col.addView(txt("¿Qué hacer con los archivos que tienen el mismo nombre en el destino?", 13f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
+            val opts = listOf("Reemplazar los existentes", "Omitir los existentes", "Conservar ambos (nombre nuevo)")
+            for ((i, label) in opts.withIndex()) {
+                val r = optionRow(label, false)
+                r.setOnClickListener {
+                    d.dismiss()
+                    arcStart(dest, i, total)
+                }
+                col.addView(r, lp(-1, -2).also { it.topMargin = dp(4) })
+            }
+            val no = ghostButton("Cancelar")
+            no.setOnClickListener { d.dismiss() }
+            col.addView(no, lp(-1, dp(46)).also { it.topMargin = dp(10) })
+            col
+        }
+    }
+
+    private fun arcStart(dest: File, policy: Int, total: Long) {
+        val f = arcFile ?: return
+        if (arcBusy) return
+        arcBusy = true
+        arcCancel = false
+        val fmt = arcFmt
+        val pwd = arcPwd
+        val sel = HashSet<Int>(arcSel)
+        val ui = progressDialog("Extrayendo…") { arcCancel = true }
+        Thread {
+            val res = arcRun(f, fmt, pwd, sel, dest, policy) { name, bytes -> ui.update(name, bytes, total) }
+            runOnUiThread {
+                ui.close()
+                arcBusy = false
+                arcFinish(res, dest)
+            }
+        }.start()
+    }
+
+    private fun arcFinish(res: ArcOut, dest: File) {
+        if (res.needPwd) {
+            val wrong = arcPwd != null
+            arcAskPassword(wrong, { p ->
+                arcPwd = p
+                arcPrepare(dest)
+            }, { })
+            return
+        }
+        val lines = ArrayList<String>()
+        lines.add(res.ok.toString() + " archivos extraídos (" + fmtS(res.bytes) + ")")
+        if (res.skipped > 0) lines.add(res.skipped.toString() + " omitidos")
+        if (res.unsafe > 0) lines.add(res.unsafe.toString() + " omitidos por tener rutas inseguras")
+        val title = if (res.cancelled) "Extracción cancelada" else if (res.error != null) "No se pudo terminar" else "Extracción completada"
+        showSheet(false) { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt(title, 18f, TXT, true))
+            col.addView(txt(lines.joinToString("\n"), 13f, TXT), lp(-1, -2).also { it.topMargin = dp(8) })
+            if (res.error != null) col.addView(txt(res.error, 13f, AMBER), lp(-1, -2).also { it.topMargin = dp(8) })
+            val row = LinearLayout(this)
+            val no = ghostButton("Cerrar")
+            no.setOnClickListener { d.dismiss() }
+            val yes = primaryButton("Abrir carpeta")
+            yes.setOnClickListener {
+                d.dismiss()
+                goToFolder(dest)
+            }
+            row.addView(no, lp(0, dp(48), 1f))
+            row.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+            col.addView(row, lp(-1, -2).also { it.topMargin = dp(16) })
+            col
+        }
+    }
+
+    // ---------- Crear ZIP ----------
+    private fun zipSheet(files: List<File>) {
+        if (files.isEmpty()) return
+        val first = files[0]
+        val par = first.parentFile ?: return
+        var destDir: File = par
+        val startName = if (files.size == 1) (if (first.isDirectory) first.name else first.nameWithoutExtension.ifEmpty { first.name }) else "Archivos"
+        showSheet(false) { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt("Comprimir en ZIP", 18f, TXT, true))
+            col.addView(txt(files.size.toString() + (if (files.size == 1) " elemento" else " elementos"), 12f, MUTE))
+            val et = EditText(this)
+            et.setText(startName)
+            et.setTextColor(TXT)
+            et.typeface = face(false)
+            et.isSingleLine = true
+            et.background = rounded(alpha(Color.WHITE, 0x14), 12)
+            et.setPadding(dp(14), dp(12), dp(14), dp(12))
+            col.addView(et, lp(-1, -2).also { it.topMargin = dp(12) })
+            val destT = txt("Se guardará en: " + relPath(destDir), 12f, MUTE)
+            col.addView(destT, lp(-1, -2).also { it.topMargin = dp(10) })
+            val change = txt("Cambiar carpeta de destino", 13f, ACC2, true)
+            change.setPadding(0, dp(8), dp(8), dp(8))
+            change.setOnClickListener {
+                pickFolder("Guardar el ZIP en", "Guardar aquí", destDir) { dd ->
+                    destDir = dd
+                    destT.text = "Se guardará en: " + relPath(dd)
+                    true
+                }
+            }
+            col.addView(change, lp(-2, -2))
+            val row = LinearLayout(this)
+            val no = ghostButton("Cancelar")
+            no.setOnClickListener { d.dismiss() }
+            val yes = primaryButton("Crear ZIP")
+            yes.setOnClickListener {
+                var n = et.text.toString().trim().replace("/", "").replace("\\", "")
+                if (n.isEmpty()) n = "Archivos"
+                if (!n.lowercase().endsWith(".zip")) n += ".zip"
+                d.dismiss()
+                zipStart(files, File(destDir, n))
+            }
+            row.addView(no, lp(0, dp(48), 1f))
+            row.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+            col.addView(row, lp(-1, -2).also { it.topMargin = dp(14) })
+            col
+        }
+    }
+
+    private fun zipCollect(files: List<File>, out: File, items: ArrayList<ZItem>) {
+        for (r in files) {
+            if (java.nio.file.Files.isSymbolicLink(r.toPath())) continue
+            if (r.isDirectory) {
+                val stack = ArrayList<Pair<File, String>>()
+                stack.add(Pair(r, r.name))
+                while (stack.isNotEmpty()) {
+                    val (d, rel) = stack.removeAt(stack.size - 1)
+                    val kids = d.listFiles() ?: continue
+                    if (kids.isEmpty()) items.add(ZItem(d, rel + "/", true))
+                    for (k in kids) {
+                        if (java.nio.file.Files.isSymbolicLink(k.toPath())) continue
+                        if (k.absolutePath == out.absolutePath || k.name.endsWith(".nexora-part")) continue
+                        if (k.isDirectory) stack.add(Pair(k, rel + "/" + k.name)) else items.add(ZItem(k, rel + "/" + k.name, false))
+                    }
+                }
+            } else if (r.absolutePath != out.absolutePath) {
+                items.add(ZItem(r, r.name, false))
+            }
+        }
+    }
+
+    private fun zipStart(files: List<File>, out0: File) {
+        if (arcBusy) return
+        arcBusy = true
+        arcCancel = false
+        val out = if (out0.exists()) uniqueFile(out0) else out0
+        val ui = progressDialog("Comprimiendo…") { arcCancel = true }
+        Thread {
+            var ok = 0
+            var failed = 0
+            var err: String? = null
+            var cancelled = false
+            val tmp = File(out.parentFile, out.name + ".nexora-part")
+            try {
+                val items = ArrayList<ZItem>()
+                zipCollect(files, out, items)
+                var total = 0L
+                for (x in items) if (!x.isDir) total += x.f.length()
+                var done = 0L
+                var last = 0L
+                java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(FileOutputStream(tmp), 65536)).use { zos ->
+                    val buf = ByteArray(65536)
+                    for (x in items) {
+                        if (arcCancel) throw ArcCancel()
+                        val ze = java.util.zip.ZipEntry(x.rel)
+                        ze.time = x.f.lastModified()
+                        if (x.isDir) {
+                            zos.putNextEntry(ze)
+                            zos.closeEntry()
+                            continue
+                        }
+                        val ins = try {
+                            FileInputStream(x.f)
+                        } catch (e: Exception) {
+                            null
+                        }
+                        if (ins == null) {
+                            failed++
+                            continue
+                        }
+                        ins.use { src ->
+                            zos.putNextEntry(ze)
+                            while (true) {
+                                if (arcCancel) throw ArcCancel()
+                                val n = src.read(buf)
+                                if (n < 0) break
+                                zos.write(buf, 0, n)
+                                done += n.toLong()
+                                val now = System.currentTimeMillis()
+                                if (now - last > 150L) {
+                                    last = now
+                                    ui.update(x.rel, done, total)
+                                }
+                            }
+                            zos.closeEntry()
+                        }
+                        ok++
+                    }
+                }
+                if (out.exists()) out.delete()
+                if (!tmp.renameTo(out)) throw Exception("No se pudo guardar el archivo ZIP (permission denied)")
+            } catch (e: ArcCancel) {
+                cancelled = true
+                tmp.delete()
+            } catch (e: Throwable) {
+                tmp.delete()
+                err = arcError(e, "zip")
+            }
+            val er = err
+            val canc = cancelled
+            val n1 = ok
+            val n2 = failed
+            runOnUiThread {
+                ui.close()
+                arcBusy = false
+                if (!inViewer && dir.absolutePath == out.parentFile?.absolutePath) refresh()
+                val title = if (canc) "Compresión cancelada" else if (er != null) "No se pudo crear el ZIP" else "ZIP creado"
+                val txtMsg = if (canc) "No se guardó ningún archivo." else if (er != null) er else out.name + "\n" + n1 + " archivos · " + fmtS(out.length()) + (if (n2 > 0) "\n" + n2 + " no se pudieron leer y se omitieron" else "")
+                showSheet(false) { d ->
+                    val col = LinearLayout(this)
+                    col.orientation = LinearLayout.VERTICAL
+                    col.addView(txt(title, 18f, TXT, true))
+                    col.addView(txt(txtMsg, 13f, if (er != null) AMBER else TXT), lp(-1, -2).also { it.topMargin = dp(8) })
+                    val row = LinearLayout(this)
+                    val no = ghostButton("Cerrar")
+                    no.setOnClickListener { d.dismiss() }
+                    row.addView(no, lp(0, dp(48), 1f))
+                    if (er == null && !canc) {
+                        val yes = primaryButton("Abrir carpeta")
+                        yes.setOnClickListener {
+                            d.dismiss()
+                            goToFolder(out.parentFile ?: out)
+                        }
+                        row.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+                    }
+                    col.addView(row, lp(-1, -2).also { it.topMargin = dp(16) })
+                    col
+                }
+            }
+        }.start()
     }
 
     @Deprecated("Deprecated in Java")
@@ -5233,6 +6273,12 @@ private class MenuIcon(ctx: Context, val kind: Int, val col: Int) : View(ctx) {
                 path.close()
                 cv.drawPath(path, p)
             }
+            24 -> {
+                cv.drawRoundRect(RectF(w * 0.14f, h * 0.16f, w * 0.86f, h * 0.86f), w * 0.08f, w * 0.08f, p)
+                cv.drawLine(w * 0.14f, h * 0.38f, w * 0.86f, h * 0.38f, p)
+                cv.drawLine(w * 0.50f, h * 0.16f, w * 0.50f, h * 0.38f, p)
+                cv.drawRect(RectF(w * 0.43f, h * 0.52f, w * 0.57f, h * 0.68f), p)
+            }
             23 -> {
                 cv.drawCircle(w * 0.5f, h * 0.40f, w * 0.26f, p)
                 cv.drawLine(w * 0.40f, h * 0.62f, w * 0.40f, h * 0.78f, p)
@@ -5244,6 +6290,65 @@ private class MenuIcon(ctx: Context, val kind: Int, val col: Int) : View(ctx) {
     }
 }
 
+
+private class ArcEntry(val name: String, val isDir: Boolean, val size: Long, val idx: Int)
+private class ArcCancel : Exception()
+private class NeedPwd : Exception()
+private class ArcOut(val ok: Int, val skipped: Int, val unsafe: Int, val cancelled: Boolean, val needPwd: Boolean, val error: String?, val bytes: Long)
+private class ZItem(val f: File, val rel: String, val isDir: Boolean)
+
+private class SevenZStream(val z: org.apache.commons.compress.archivers.sevenz.SevenZFile) : java.io.InputStream() {
+    override fun read(): Int {
+        val b = ByteArray(1)
+        val n = z.read(b, 0, 1)
+        return if (n <= 0) -1 else (b[0].toInt() and 0xFF)
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int = z.read(b, off, len)
+}
+
+private class ArcPO(val o: java.io.OutputStream, val tick: (Long) -> Unit, val cancelled: () -> Boolean) : java.io.OutputStream() {
+    override fun write(b: Int) {
+        o.write(b)
+    }
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        if (cancelled()) throw ArcCancel()
+        o.write(b, off, len)
+        tick(len.toLong())
+    }
+
+    override fun flush() {
+        o.flush()
+    }
+
+    override fun close() {
+        o.close()
+    }
+}
+
+private class ProgUi(val dlg: Dialog, val nameT: TextView, val bar: ProgressBar, val pctT: TextView, val fmt: (Long) -> String) {
+    fun update(name: String, bytes: Long, total: Long) {
+        nameT.post {
+            nameT.text = name
+            if (total > 0L) {
+                bar.isIndeterminate = false
+                bar.progress = (bytes * 1000L / total).toInt().coerceIn(0, 1000)
+                pctT.text = fmt(bytes) + " de " + fmt(total)
+            } else {
+                bar.isIndeterminate = true
+                pctT.text = fmt(bytes)
+            }
+        }
+    }
+
+    fun close() {
+        try {
+            dlg.dismiss()
+        } catch (e: Exception) {
+        }
+    }
+}
 
 private class StorageBar(ctx: Context, val frac: Float, val fill: Int, val track: Int) : View(ctx) {
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
