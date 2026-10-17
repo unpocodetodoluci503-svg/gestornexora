@@ -16,6 +16,9 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.os.Bundle
 import android.os.PowerManager
 import android.view.Choreographer
@@ -30,8 +33,10 @@ import kotlin.math.exp
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.math.tanh
 
 // ============================================================================
 //  Nexora · Halloween (v2)
@@ -47,10 +52,17 @@ private const val TAU = 6.2831855f
 private const val DEG = 0.017453292f
 
 // Ciclo de la luna (segundos): intacta -> grietas -> carga -> explosión -> renace
-private const val CYC = 38f
+private const val CYC = 45f
 private const val CRACK_T0 = 4f
 private const val CRACK_T1 = 26f
 private const val BLAST_T = 27.6f
+private const val CRE_T0 = 4.4f      // la criatura aparece (s despues de la explosion)
+private const val REB_T = 12.6f      // la luna empieza a renacer
+private const val LAUGH_AT = 3.9f    // la carcajada empieza (s desde que aparece la criatura)
+private const val LAUGH_LEN = 2.4f
+private const val PI_F = 3.1415927f
+private val LAUGH_ON = floatArrayOf(0f, 0.34f, 0.68f, 1.02f, 1.36f)
+private val LAUGH_DUR = floatArrayOf(0.24f, 0.24f, 0.24f, 0.27f, 0.95f)
 
 private fun hwLerp(a: Int, b: Int, t: Float): Int {
     val k = t.coerceIn(0f, 1f)
@@ -253,7 +265,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private val er = FloatArray(maxEmb)
     private val ety = IntArray(maxEmb)
 
-    private val maxSm = 16
+    private val maxSm = 64
     private val sx = FloatArray(maxSm)
     private val sy = FloatArray(maxSm)
     private val sdx = FloatArray(maxSm)
@@ -263,7 +275,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private var smokeT = 0f
 
     // fuego de partículas
-    private val maxFire = 140
+    private val maxFire = 320
     private val fpx = FloatArray(maxFire)
     private val fpy = FloatArray(maxFire)
     private val fvx = FloatArray(maxFire)
@@ -305,12 +317,64 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private val btnF = FloatArray(maxBtn * 4)
     private var btnN = 0
 
-    // luna: grietas y posición del fondo en la ventana
-    private val crackPts = FloatArray(15 * 7 * 2)
-    private val crackStart = FloatArray(15)
+    // luna rota: geometría de las grietas y de los trozos
+    private val bnd = FloatArray(8 * 7 * 2)
+    private val ringP = FloatArray(8 * 5 * 2)
+    private val arcP = FloatArray(8 * 3 * 2)
+    private val brn = FloatArray(10 * 4 * 2)
+    private val bStart = FloatArray(8)
+    private val brnStart = FloatArray(10)
+    private val pieceDir = FloatArray(8)
+    private val detT = FloatArray(6)
+    private val detIdx = intArrayOf(1, 4, 6, 2, 7, 0)
+    private val evT = FloatArray(16)
+    private val piece = Path()
     private val locBuf = IntArray(2)
     private var bgOffX = 0f
     private var bgOffY = 0f
+
+    // posición de la luna (sobre la capa de arriba, lejos de los botones)
+    private var moonX = 0f
+    private var moonY = 0f
+    private var moonTX = 0f
+    private var moonTY = 0f
+    private var moonInit = false
+    private var moonT = 0f
+
+    // criatura voladora
+    private var crX = 0f
+    private var crY = 0f
+    private var crSc = 0f
+    private var crRoll = 0f
+    private var crAl = 0f
+    private var crHead = 0f
+    private var crJaw = 0f
+    private var crFlare = 0f
+    private var crArms = 0f
+    private var crVX = 0f
+    private var crVY = 0f
+    private var crWasOn = false
+    private var crFireAcc = 0f
+    private var crSmokeAcc = 0f
+    private var wxT = 0f
+    private var wyT = 0f
+
+    // sonido y botón de silencio
+    private var sound: HwSound? = null
+    private var prevCt = 0f
+    private var rumbleOn = false
+    private var muted = false
+    private var muteX = 0f
+    private var muteY = 0f
+    private var muteTX = 0f
+    private var muteTY = 0f
+    private var muteInit = false
+    private var muteT = 0f
+    private var muteTouch = false
+
+    private val pFireS = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val shCape = LinearGradient(0f, 0f, 0f, 2.2f, intArrayOf(hc(0xFF35120A), hc(0xFF120508), hc(0xFF06020A)), floatArrayOf(0f, 0.45f, 1f), clamp)
+    private val shSkullDark = RadialGradient(-0.25f, -0.3f, 1.1f, intArrayOf(hc(0xFF4A3F36), hc(0xFF1F1814), hc(0xFF0A0605)), floatArrayOf(0f, 0.5f, 1f), clamp)
 
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
         hookBackground()
@@ -333,6 +397,18 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         pumps[2].wait = 5f
         flyer.wait = 4f
         buildCracks()
+        pFireS.style = Paint.Style.STROKE
+        pFireS.strokeCap = Paint.Cap.ROUND
+        pFireS.strokeJoin = Paint.Join.ROUND
+        pFireS.xfermode = PorterDuffXfermode(PorterDuff.Mode.ADD)
+        for (k in 0 until 16) {
+            val x = (k + 0.5f) / 16f
+            evT[k] = CRACK_T0 + (CRACK_T1 - CRACK_T0) * (1f - (1f - x).pow(1.7f))
+        }
+        try {
+            muted = ctx.getSharedPreferences("nexora", Context.MODE_PRIVATE).getBoolean("hwMute", false)
+        } catch (e: Exception) {
+        }
         for (l in lurks) l.wait = rf(0.5f, 4f)
     }
 
@@ -344,8 +420,46 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         if (on) {
             readEnv()
             readInsets()
+            ensureSound()
+            prevCt = t % CYC
+            rumbleOn = false
             schedule()
+        } else {
+            sound?.stopAll()
+            rumbleOn = false
         }
+    }
+
+    private fun ensureSound() {
+        if (sound == null) {
+            val s = HwSound()
+            s.muted = muted
+            s.prepare()
+            sound = s
+        }
+    }
+
+    private fun toggleMute() {
+        muted = !muted
+        try {
+            context.getSharedPreferences("nexora", Context.MODE_PRIVATE).edit().putBoolean("hwMute", muted).apply()
+        } catch (e: Exception) {
+        }
+        val s = sound
+        if (s != null) {
+            s.muted = muted
+            if (muted) s.stopAll()
+        }
+        rumbleOn = false
+        invalidate()
+    }
+
+    private fun inMute(x: Float, y: Float): Boolean {
+        if (!muteInit) return false
+        val dx = x - muteX
+        val dy = y - muteY
+        val r = 24f * d
+        return dx * dx + dy * dy <= r * r
     }
 
     private fun readEnv() {
@@ -398,13 +512,19 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         vto = o
         o.addOnPreDrawListener(preDraw)
         o.addOnScrollChangedListener(scrollL)
-        if (active) schedule()
+        if (active) {
+            ensureSound()
+            schedule()
+        }
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         Choreographer.getInstance().removeFrameCallback(this)
         posted = false
+        sound?.release()
+        sound = null
+        rumbleOn = false
         val o = vto
         if (o != null && o.isAlive) {
             o.removeOnPreDrawListener(preDraw)
@@ -414,7 +534,34 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     }
 
     override fun onTouchEvent(event: MotionEvent?): Boolean = false
-    override fun dispatchTouchEvent(ev: MotionEvent?): Boolean = false
+    override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
+        if (ev == null) return false
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (inMute(ev.x, ev.y)) {
+                    muteTouch = true
+                    return true
+                }
+                return false
+            }
+            MotionEvent.ACTION_UP -> {
+                if (muteTouch) {
+                    muteTouch = false
+                    if (inMute(ev.x, ev.y)) toggleMute()
+                    return true
+                }
+                return false
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (muteTouch) {
+                    muteTouch = false
+                    return true
+                }
+                return false
+            }
+        }
+        return muteTouch
+    }
 
     // Cambia el degradado azul de cada pantalla por el fondo de Halloween
     private fun hookBackground() {
@@ -496,12 +643,16 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             if (ey[i] < -12f * d) respawnEmber(i, false)
         }
         updateAnchors(dt)
+        updateMoon(dt)
+        updateMute(dt)
         stepSmoke(dt)
         stepLurks(dt)
         stepPumpkins(dt)
         stepFlyer(dt)
+        stepCreature(dt)
         stepFire(dt)
         stepBolt(dt)
+        stepSound(dt)
     }
 
     private fun skullS(): Float = 34f * d
@@ -945,7 +1096,6 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             pFill.alpha = (tw.coerceIn(0f, 1f) * 190f).toInt()
             c.drawCircle(hwHash(i, 1) * w, hwHash(i, 2) * h * 0.6f, (0.6f + 1f * hwHash(i, 4)) * d, pFill)
         }
-        drawMoon(c, w, h, ct)
         // nubes oscuras
         for (k in 0..1) {
             val span = w + 260f * d
@@ -970,7 +1120,6 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             val s = (7f + 7f * hwHash(i, 14)) * d
             drawBat(c, bx, by, s, sin(t * (11f + i) + i))
         }
-        if (eBlast >= 0f) drawBlast(c, w, h, eBlast)
         // relámpago
         if (boltAge < 0.5f) {
             val k = if (boltAge < 0.08f) 1f else if (boltAge < 0.14f) 0.2f else if (boltAge < 0.22f) 0.9f else max(0f, 1f - (boltAge - 0.22f) / 0.28f)
@@ -1015,54 +1164,197 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         c.restore()
     }
 
-    // ------------------------------------------------------------ luna y explosión
+    // ------------------------------------------------------------ luna rota
     private fun buildCracks() {
-        for (i in 0 until 10) {
-            val a = i * TAU / 10f + (hwHash(i, 91) - 0.5f) * 0.5f
-            val r0 = 0.04f + 0.2f * hwHash(i, 92)
-            genCrack(i, cos(a) * r0, sin(a) * r0, a, 0.95f - r0, i * 17)
-            crackStart[i] = 0.5f * hwHash(i, 93)
+        val radii = floatArrayOf(0f, 0.15f, 0.3f, 0.45f, 0.62f, 0.8f, 1f)
+        for (i in 0 until 8) {
+            var a = i * TAU / 8f + (hwHash(i, 200) - 0.5f) * 0.45f
+            for (k in 0..6) {
+                a += (hwHash(i * 7 + k, 201) - 0.5f) * 0.22f
+                val r = if (k == 0) 0f else if (k == 6) 1f else radii[k] + (hwHash(i * 7 + k, 202) - 0.5f) * 0.06f
+                bnd[(i * 7 + k) * 2] = cos(a) * r
+                bnd[(i * 7 + k) * 2 + 1] = sin(a) * r
+            }
+            bStart[i] = 0.02f + 0.5f * hwHash(i, 203)
         }
-        for (b in 0 until 5) {
-            val parent = b * 2
-            val px = crackPts[(parent * 7 + 3) * 2]
-            val py = crackPts[(parent * 7 + 3) * 2 + 1]
-            val pa = atan2(py - crackPts[(parent * 7 + 2) * 2 + 1], px - crackPts[(parent * 7 + 2) * 2])
-            val ang = pa + (if (b % 2 == 0) 0.7f else -0.7f)
-            genCrack(10 + b, px, py, ang, 0.55f, 200 + b * 13)
-            crackStart[10 + b] = 0.35f + 0.3f * hwHash(b, 94)
+        for (i in 0 until 8) {
+            val j = (i + 1) % 8
+            val px = bnd[(i * 7 + 3) * 2]
+            val py = bnd[(i * 7 + 3) * 2 + 1]
+            val qx = bnd[(j * 7 + 3) * 2]
+            val qy = bnd[(j * 7 + 3) * 2 + 1]
+            ringP[(i * 5) * 2] = px
+            ringP[(i * 5) * 2 + 1] = py
+            ringP[(i * 5 + 4) * 2] = qx
+            ringP[(i * 5 + 4) * 2 + 1] = qy
+            for (m in 1..3) {
+                val u = m / 4f
+                val mx = px + (qx - px) * u
+                val my = py + (qy - py) * u
+                val len = sqrt(mx * mx + my * my) + 0.0001f
+                val rr = 0.45f + (hwHash(i * 5 + m, 204) - 0.5f) * 0.1f
+                ringP[(i * 5 + m) * 2] = mx / len * rr
+                ringP[(i * 5 + m) * 2 + 1] = my / len * rr
+            }
+            val a1 = atan2(bnd[(i * 7 + 6) * 2 + 1], bnd[(i * 7 + 6) * 2])
+            var a2 = atan2(bnd[(j * 7 + 6) * 2 + 1], bnd[(j * 7 + 6) * 2])
+            if (a2 < a1) a2 += TAU
+            for (m in 0..2) {
+                val aa = a1 + (a2 - a1) * (m + 1) / 4f
+                arcP[(i * 3 + m) * 2] = cos(aa)
+                arcP[(i * 3 + m) * 2 + 1] = sin(aa)
+            }
+            pieceDir[i] = (a1 + a2) * 0.5f
+        }
+        for (b in 0 until 10) {
+            val bi = b % 8
+            val k0 = 2 + (b % 3)
+            var x = bnd[(bi * 7 + k0) * 2]
+            var y = bnd[(bi * 7 + k0) * 2 + 1]
+            var a = atan2(y, x) + (if (b % 2 == 0) 0.7f else -0.7f) * (0.6f + 0.6f * hwHash(b, 205))
+            val len = 0.22f + 0.18f * hwHash(b, 206)
+            for (k in 0..3) {
+                brn[(b * 4 + k) * 2] = x
+                brn[(b * 4 + k) * 2 + 1] = y
+                a += (hwHash(b * 4 + k, 207) - 0.5f) * 0.8f
+                x += cos(a) * len / 3f
+                y += sin(a) * len / 3f
+            }
+            brnStart[b] = 0.3f + 0.45f * hwHash(b, 208)
+        }
+        // los trozos que se desprenden tienen sus grietas listas antes de caer
+        for (k in 0 until 6) {
+            detT[k] = CRACK_T0 + (CRACK_T1 - CRACK_T0) * (0.55f + 0.07f * k)
+            val need = 0.08f + 0.07f * k
+            val i = detIdx[k]
+            val j = (i + 1) % 8
+            bStart[i] = min(bStart[i], need)
+            bStart[j] = min(bStart[j], need)
         }
     }
 
-    private fun genCrack(idx: Int, sx0: Float, sy0: Float, ang: Float, len: Float, seed: Int) {
-        var x = sx0
-        var y = sy0
-        var a = ang
-        for (k in 0..6) {
-            crackPts[(idx * 7 + k) * 2] = x
-            crackPts[(idx * 7 + k) * 2 + 1] = y
-            a += (hwHash(seed + k, 95) - 0.5f) * 0.9f
-            x += cos(a) * len / 6f
-            y += sin(a) * len / 6f
+    private fun piecePath(i: Int) {
+        val j = (i + 1) % 8
+        piece.reset()
+        piece.moveTo(bnd[(i * 7 + 3) * 2], bnd[(i * 7 + 3) * 2 + 1])
+        for (k in 4..6) piece.lineTo(bnd[(i * 7 + k) * 2], bnd[(i * 7 + k) * 2 + 1])
+        for (m in 0..2) piece.lineTo(arcP[(i * 3 + m) * 2], arcP[(i * 3 + m) * 2 + 1])
+        for (k in 6 downTo 3) piece.lineTo(bnd[(j * 7 + k) * 2], bnd[(j * 7 + k) * 2 + 1])
+        for (m in 3 downTo 1) piece.lineTo(ringP[(i * 5 + m) * 2], ringP[(i * 5 + m) * 2 + 1])
+        piece.close()
+    }
+
+    // arma en tmp el tramo de la grieta que ya se abrio (g de 0 a 1)
+    private fun partialPath(arr: FloatArray, base: Int, n: Int, g: Float) {
+        val total = g * (n - 1)
+        var full = total.toInt()
+        if (full > n - 1) full = n - 1
+        tmp.reset()
+        tmp.moveTo(arr[base * 2], arr[base * 2 + 1])
+        for (k in 1..full) tmp.lineTo(arr[(base + k) * 2], arr[(base + k) * 2 + 1])
+        if (full < n - 1) {
+            val fr = total - full
+            val a0 = (base + full) * 2
+            val b0 = (base + full + 1) * 2
+            tmp.lineTo(arr[a0] + (arr[b0] - arr[a0]) * fr, arr[a0 + 1] + (arr[b0 + 1] - arr[a0 + 1]) * fr)
         }
     }
 
-    private fun drawMoon(c: Canvas, w: Float, h: Float, ct: Float) {
+    private fun strokeCrack(c: Canvas, op: Float, light: Float, charge: Float, mr: Float, wk: Float) {
+        pStroke.shader = null
+        pStroke.color = hc(0xDD1E0A00)
+        pStroke.strokeWidth = (2.6f + 3f * op) * wk * d / mr
+        c.drawPath(tmp, pStroke)
+        pFireS.color = hc(0xFFFF7A18)
+        pFireS.alpha = (((0.35f + 0.4f * op) * light + charge * 0.3f) * 255f).toInt().coerceIn(0, 255)
+        pFireS.strokeWidth = (4f + 9f * op) * wk * d / mr
+        c.drawPath(tmp, pFireS)
+        pFireS.color = hc(0xFFFFF0B8)
+        pFireS.alpha = ((0.5f + 0.5f * op) * light * 255f).toInt().coerceIn(0, 255)
+        pFireS.strokeWidth = (1.2f + 2.6f * op) * wk * d / mr
+        c.drawPath(tmp, pFireS)
+    }
+
+    // elige un hueco sin botones para la luna (solo cuando no se esta rompiendo)
+    private fun updateMoon(dt: Float) {
+        if (W <= 0f) return
+        val ct = t % CYC
+        val hh = if (bgH > 0f) bgH else H
+        val mr = 34f * d
+        if (!moonInit) {
+            moonX = W * 0.8f
+            moonY = bgOffY + hh * 0.12f
+            moonTX = moonX
+            moonTY = moonY
+            moonInit = true
+        }
+        moonT += dt
+        val free = ct < CRACK_T0 || ct >= BLAST_T + 7f
+        if (free && moonT >= 0.5f) {
+            moonT = 0f
+            var bestC = Float.MAX_VALUE
+            for (i in 0..7) {
+                for (j in 0..5) {
+                    val x = W * (0.3f + 0.6f * i / 7f)
+                    val y = bgOffY + hh * (0.04f + 0.24f * j / 5f)
+                    var cost = 0f
+                    for (b in 0 until btnN) {
+                        val ox = min(x + mr * 1.25f, btnF[b * 4 + 2]) - max(x - mr * 1.25f, btnF[b * 4])
+                        val oy = min(y + mr * 1.25f, btnF[b * 4 + 3]) - max(y - mr * 1.25f, btnF[b * 4 + 1])
+                        if (ox > 0f && oy > 0f) cost += ox * oy / (d * d)
+                    }
+                    cost += (abs(x - W * 0.8f) + abs(y - (bgOffY + hh * 0.1f))) / d * 0.3f
+                    if (cost < bestC) {
+                        bestC = cost
+                        moonTX = x
+                        moonTY = y
+                    }
+                }
+            }
+        }
+        moonX += (moonTX - moonX) * min(1f, dt * 2f)
+        moonY += (moonTY - moonY) * min(1f, dt * 2f)
+    }
+
+    private fun drawMoon(c: Canvas) {
+        if (W <= 0f || !moonInit) return
+        val ct = t % CYC
         val mr = 34f * d
         val crackP = if (ct < CRACK_T0) 0f else if (ct < CRACK_T1) (ct - CRACK_T0) / (CRACK_T1 - CRACK_T0) else 1f
         val charge = if (ct >= CRACK_T1 && ct < BLAST_T) (ct - CRACK_T1) / (BLAST_T - CRACK_T1) else 0f
         val e = if (ct >= BLAST_T) ct - BLAST_T else -1f
-        val reb = if (e >= 6.5f) ((e - 6.5f) / 3.9f).coerceIn(0f, 1f) else 0f
+        val reb = if (e >= REB_T) ((e - REB_T) / 3.9f).coerceIn(0f, 1f) else 0f
         if (e >= 0f && reb <= 0f) return
         val intensity = crackP * crackP
         val pulse = sin(t * (0.9f + 6f * crackP + 8f * charge))
-        var mx = w * 0.78f
-        var my = h * 0.17f
-        if (e < 0f && crackP > 0.25f) {
-            val amp = (0.3f + 2.2f * intensity + 4f * charge) * d
-            mx += sin(t * 61f) * amp
-            my += cos(t * 47f) * amp
+        // vibraciones: constante, mas un tiron con cada ruptura
+        var jx = 0f
+        var jy = 0f
+        if (e < 0f) {
+            if (crackP > 0.2f) {
+                val amp = (0.3f + 2.2f * intensity + 4f * charge) * d
+                jx += sin(t * 61f) * amp
+                jy += cos(t * 47f) * amp
+            }
+            for (k in 0 until 16) {
+                val tau = ct - evT[k]
+                if (tau >= 0f && tau < 0.5f) {
+                    val amp = exp(-tau * 10f) * (0.6f + 2.2f * crackP) * d
+                    jx += sin(tau * 90f + k) * amp
+                    jy += cos(tau * 83f + k * 2f) * amp
+                }
+            }
+            for (k in 0 until 6) {
+                val tau = ct - detT[k]
+                if (tau >= 0f && tau < 0.6f) {
+                    val amp = exp(-tau * 8f) * 3.5f * d
+                    jx += sin(tau * 95f) * amp
+                    jy += cos(tau * 77f) * amp
+                }
+            }
         }
+        val mx = moonX + jx
+        val my = moonY + jy
         val sc = if (e < 0f) 1f else 0.55f + 0.45f * hwEase(reb)
         val al = if (e < 0f) 1f else hwEase(reb)
         // halo
@@ -1071,13 +1363,15 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         val hr = mr * (3.4f + 1.2f * intensity + 2f * charge) * sc
         c.scale(hr, hr)
         pGlow.shader = shGlowOrange
-        pGlow.alpha = ((0.75f + 0.2f * pulse) * al * 255f).toInt().coerceIn(0, 255)
+        pGlow.alpha = ((0.5f + 0.15f * pulse) * al * 255f).toInt().coerceIn(0, 255)
         c.drawCircle(0f, 0f, 1f, pGlow)
         c.restore()
-        if (crackP > 0.3f || charge > 0f) {
+        // luz que sube desde el interior
+        if (crackP > 0.15f || charge > 0f) {
             c.save()
             c.translate(mx, my)
-            c.scale(mr * (1.8f + 1.5f * charge), mr * (1.8f + 1.5f * charge))
+            val lr = mr * (1.4f + 1.6f * intensity + 1.5f * charge)
+            c.scale(lr, lr)
             pFire.shader = shFireHot
             pFire.alpha = ((intensity * 0.7f + charge * 0.3f) * (0.7f + 0.3f * pulse) * al * 255f).toInt().coerceIn(0, 255)
             c.drawCircle(0f, 0f, 1f, pFire)
@@ -1095,49 +1389,119 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         c.drawCircle(-0.3f, -0.2f, 0.22f, pFill)
         c.drawCircle(0.35f, 0.1f, 0.28f, pFill)
         c.drawCircle(-0.05f, 0.45f, 0.16f, pFill)
-        // grietas que brillan
         if (e < 0f && crackP > 0f) {
-            val gl = (0.35f + 0.65f * crackP + 0.3f * charge) * (0.8f + 0.2f * pulse)
-            for (i in 0 until 15) {
-                val g = ((crackP - crackStart[i]) / 0.3f).coerceIn(0f, 1f)
-                if (g <= 0f) continue
-                val total = g * 6f
-                val full = total.toInt()
-                tmp.reset()
-                tmp.moveTo(crackPts[i * 14], crackPts[i * 14 + 1])
-                for (k in 1..min(full, 6)) tmp.lineTo(crackPts[(i * 7 + k) * 2], crackPts[(i * 7 + k) * 2 + 1])
-                if (full < 6) {
-                    val fr = total - full
-                    val a0 = (i * 7 + full) * 2
-                    val b0 = (i * 7 + full + 1) * 2
-                    tmp.lineTo(crackPts[a0] + (crackPts[b0] - crackPts[a0]) * fr, crackPts[a0 + 1] + (crackPts[b0 + 1] - crackPts[a0 + 1]) * fr)
-                }
-                pStroke.shader = null
-                pStroke.color = hc(0xCC2A0E00)
-                pStroke.strokeWidth = 3.4f * d / mr
-                c.drawPath(tmp, pStroke)
-                pStroke.color = hc(0xFFFFB43C)
-                pStroke.alpha = (gl * 0.55f * 255f).toInt().coerceIn(0, 255)
-                pStroke.strokeWidth = 6f * d / mr
-                c.drawPath(tmp, pStroke)
-                pStroke.color = hc(0xFFFFF1B8)
-                pStroke.alpha = (gl * 255f).toInt().coerceIn(0, 255)
-                pStroke.strokeWidth = 1.7f * d / mr
-                c.drawPath(tmp, pStroke)
+            val light = 0.85f + 0.15f * pulse
+            // hueco brillante donde ya se desprendio un trozo
+            for (k in 0 until 6) {
+                if (ct - detT[k] < 0f) continue
+                piecePath(detIdx[k])
+                pFire.shader = null
+                pFire.color = hc(0xFFFFC060)
+                pFire.alpha = ((0.75f + 0.25f * sin(t * 12f + k)) * 255f).toInt().coerceIn(0, 255)
+                c.drawPath(piece, pFire)
             }
-            // energía que se escapa por las grietas
+            // grietas principales: nacen en el centro y avanzan hacia el borde
+            for (i in 0 until 8) {
+                val g = ((crackP - bStart[i]) / 0.35f).coerceIn(0f, 1f)
+                if (g <= 0f) continue
+                val op = ((crackP - bStart[i]) / 0.5f).coerceIn(0f, 1f)
+                partialPath(bnd, i * 7, 7, g)
+                strokeCrack(c, op, light, charge, mr, 1f)
+            }
+            // fracturas circulares que separan los trozos
+            for (i in 0 until 8) {
+                val j = (i + 1) % 8
+                val s0 = max(bStart[i], bStart[j]) + 0.2f
+                val g = ((crackP - s0) / 0.25f).coerceIn(0f, 1f)
+                if (g <= 0f) continue
+                val op = ((crackP - s0) / 0.4f).coerceIn(0f, 1f)
+                partialPath(ringP, i * 5, 5, g)
+                strokeCrack(c, op, light, charge, mr, 0.75f)
+            }
+            // ramificaciones finas
+            for (b in 0 until 10) {
+                val g = ((crackP - brnStart[b]) / 0.25f).coerceIn(0f, 1f)
+                if (g <= 0f) continue
+                val op = ((crackP - brnStart[b]) / 0.4f).coerceIn(0f, 1f)
+                partialPath(brn, b * 4, 4, g)
+                strokeCrack(c, op, light, charge, mr, 0.5f)
+            }
+            // rayos de luz que se escapan por el borde
+            if (crackP > 0.6f) {
+                val ba = (crackP - 0.6f) / 0.4f
+                pFire.shader = null
+                pFire.color = hc(0xFFFFD27A)
+                for (i in 0 until 8) {
+                    val rx = bnd[(i * 7 + 6) * 2]
+                    val ry = bnd[(i * 7 + 6) * 2 + 1]
+                    val fl = 0.6f + 0.4f * sin(t * (9f + i) + i)
+                    pFire.alpha = (ba * ba * fl * 150f).toInt().coerceIn(0, 255)
+                    val len = 0.9f + 0.9f * hwHash(i, 213)
+                    tmp.reset()
+                    tmp.moveTo(rx - ry * 0.06f, ry + rx * 0.06f)
+                    tmp.lineTo(rx * (1f + len), ry * (1f + len))
+                    tmp.lineTo(rx + ry * 0.06f, ry - rx * 0.06f)
+                    tmp.close()
+                    c.drawPath(tmp, pFire)
+                }
+            }
+            // trozos que se separan y caen antes de la explosion
+            for (k in 0 until 6) {
+                val tau = ct - detT[k]
+                if (tau < 0f) continue
+                val idx = detIdx[k]
+                val dir = pieceDir[idx]
+                val dist = 0.1f * tau + 0.35f * tau * tau
+                val gy = 0.25f * tau * tau
+                val cx0 = cos(dir) * 0.72f
+                val cy0 = sin(dir) * 0.72f
+                val rot = (if (k % 2 == 0) 1f else -1f) * (20f * tau + 30f * tau * tau)
+                c.save()
+                c.translate(cos(dir) * dist, sin(dir) * dist + gy)
+                c.translate(cx0, cy0)
+                c.rotate(rot)
+                c.translate(-cx0, -cy0)
+                piecePath(idx)
+                pFill.shader = shMoon
+                pFill.alpha = 255
+                c.drawPath(piece, pFill)
+                pFireS.color = hc(0xFFFFB43C)
+                pFireS.alpha = 200
+                pFireS.strokeWidth = 4f * d / mr
+                c.drawPath(piece, pFireS)
+                pStroke.shader = null
+                pStroke.color = hc(0xFFFFF0B8)
+                pStroke.alpha = 255
+                pStroke.strokeWidth = 1.4f * d / mr
+                c.drawPath(piece, pStroke)
+                c.restore()
+            }
+            // pequenas rupturas: piedritas que saltan con cada crujido
             pFill.shader = null
-            for (j in 0 until 14) {
-                val ci = j % 10
-                val u = (t * 0.9f + hwHash(j, 96)) % 1f
-                val ex0 = crackPts[(ci * 7 + 6) * 2]
-                val ey0 = crackPts[(ci * 7 + 6) * 2 + 1]
-                pFill.color = hc(0xFFFFE08A)
-                pFill.alpha = ((1f - u) * intensity * 255f).toInt().coerceIn(0, 255)
-                c.drawCircle(ex0 * (1f + u * 0.5f), ey0 * (1f + u * 0.5f), 0.05f * (1f - u), pFill)
+            for (k in 0 until 16) {
+                val tau = ct - evT[k]
+                if (tau < 0f || tau > 1.5f) continue
+                for (n in 0..1) {
+                    val b = (k + n * 3) % 8
+                    val rx = bnd[(b * 7 + 6) * 2]
+                    val ry = bnd[(b * 7 + 6) * 2 + 1]
+                    val sp = 0.35f + 0.5f * hwHash(k * 2 + n, 210)
+                    val sd = (hwHash(k * 2 + n, 211) - 0.5f) * 0.8f
+                    val px = rx + (rx * sp + sd) * tau
+                    val py = ry + ry * sp * tau + 0.8f * tau * tau
+                    val u = tau / 1.5f
+                    val sz = (0.04f + 0.04f * hwHash(k * 2 + n, 212)) * (0.6f + 0.4f * crackP)
+                    pFill.color = hwLerp(hc(0xFFFFE08A), hc(0xFF6A3A18), u)
+                    pFill.alpha = ((1f - u) * 255f).toInt().coerceIn(0, 255)
+                    c.save()
+                    c.translate(px, py)
+                    c.rotate(tau * 400f * (if (n == 0) 1f else -1f))
+                    c.drawRect(-sz, -sz * 0.7f, sz, sz * 0.7f, pFill)
+                    c.restore()
+                }
             }
         }
-        // sobrecalentamiento antes de estallar
+        // sobrecalentamiento justo antes de estallar
         if (charge > 0f) {
             pFire.shader = shFireHot
             pFire.alpha = (charge * 255f).toInt().coerceIn(0, 255)
@@ -1146,11 +1510,15 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         c.restore()
     }
 
-    private fun drawBlast(c: Canvas, w: Float, h: Float, e: Float) {
-        val mx = w * 0.78f
-        val my = h * 0.17f
+    private fun drawBlast(c: Canvas) {
+        if (W <= 0f || !moonInit) return
+        val ct = t % CYC
+        if (ct < BLAST_T) return
+        val e = ct - BLAST_T
+        val mx = moonX
+        val my = moonY
         val mr = 34f * d
-        // nebulosa de energía
+        // nebulosa de energia
         if (e < 7.5f) {
             val na = if (e < 0.4f) e / 0.4f else max(0f, 1f - (e - 0.4f) / 7f)
             val ns = mr * (2.5f + 7f * (1f - exp(-0.9f * e)))
@@ -1166,9 +1534,9 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             c.drawCircle(0f, 0f, 1f, pGlow)
             c.restore()
         }
-        // núcleo que queda brillando
-        if (e < 6.5f) {
-            val ac = (1f - e / 6.5f) * 0.55f
+        // nucleo que queda latiendo hasta que la luna renace
+        if (e < REB_T) {
+            val ac = max(0.12f, 1f - e / 6.5f) * 0.55f
             val cr = mr * (0.4f + 0.2f * sin(t * 3f))
             c.save()
             c.translate(mx, my)
@@ -1262,7 +1630,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 c.restore()
             }
         }
-        // chispas de energía
+        // chispas de energia
         if (e < 3.8f) {
             for (i in 0 until 40) {
                 val life = 1.2f + 2.4f * hwHash(i, 111)
@@ -1280,9 +1648,9 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 c.drawLine(mx + cos(a) * trav2, my + sin(a) * trav2 + 30f * d * tt * tt, mx + cos(a) * trav, my + sin(a) * trav + 30f * d * e * e, pStroke)
             }
         }
-        // renacimiento: la energía vuelve a juntarse en la luna
-        if (e >= 6.5f) {
-            val reb = ((e - 6.5f) / 3.9f).coerceIn(0f, 1f)
+        // renacimiento: la energia vuelve a juntarse en la luna
+        if (e >= REB_T) {
+            val reb = ((e - REB_T) / 3.9f).coerceIn(0f, 1f)
             pFill.shader = null
             for (i in 0 until 28) {
                 val a = hwHash(i, 120) * TAU
@@ -1316,15 +1684,531 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             pFill.alpha = (k * k * 70f).toInt().coerceIn(0, 255)
             c.drawRect(0f, 0f, W, H, pFill)
         }
-        if (e < 1.4f && bgRoot != null) {
+        if (e < 1.4f) {
             val u = e / 1.4f
             val rad = W * 1.3f * (1f - (1f - u) * (1f - u))
             pStroke.shader = null
             pStroke.color = hc(0xFFFFD27A)
             pStroke.alpha = ((1f - u) * 110f).toInt().coerceIn(0, 255)
             pStroke.strokeWidth = 3f * d
-            c.drawCircle(bgOffX + bgW * 0.78f, bgOffY + bgH * 0.17f, rad, pStroke)
+            c.drawCircle(moonX, moonY, rad, pStroke)
         }
+    }
+
+    // ------------------------------------------------------------ criatura
+    private fun crToWorld(lx: Float, ly: Float) {
+        val rr = crRoll * DEG
+        wxT = crX + (lx * cos(rr) - ly * sin(rr)) * crSc
+        wyT = crY + (lx * sin(rr) + ly * cos(rr)) * crSc
+    }
+
+    private fun emitFireV(x: Float, y: Float, size: Float, vx: Float, vy: Float, life: Float) {
+        for (i in 0 until maxFire) {
+            if (flife[i] <= 0f) {
+                fpx[i] = x
+                fpy[i] = y
+                fvx[i] = vx
+                fvy[i] = vy
+                fage[i] = 0f
+                flife[i] = rf(0.45f, 0.95f) * life
+                fsz[i] = size * rf(0.7f, 1.2f)
+                return
+            }
+        }
+    }
+
+    // trayectoria, inclinacion de cabeza y carcajada (tau = segundos desde que aparece)
+    private fun creaturePose(tau: Float) {
+        val p0x = moonX
+        val p0y = moonY
+        val p1x = W * 0.62f
+        val p1y = H * 0.40f
+        val p2x = W * 0.34f
+        val p2y = H * 0.52f
+        val p3x = -W * 0.4f
+        val p3y = H * 0.28f
+        var x: Float
+        var y: Float
+        var sc: Float
+        var roll: Float
+        var al = 1f
+        var head = 0f
+        var flare = 0.3f
+        if (tau < 2f) {
+            val u = hwEase(tau / 2f)
+            x = p0x + (p1x - p0x) * u + sin(u * TAU) * 18f * d
+            y = p0y + (p1y - p0y) * u
+            sc = 0.25f + 0.65f * u
+            al = min(1f, tau / 1.3f)
+            roll = (1f - u) * 18f
+        } else if (tau < 3.4f) {
+            val u = hwEase((tau - 2f) / 1.4f)
+            x = p1x + (p2x - p1x) * u
+            y = p1y + (p2y - p1y) * u + sin(u * PI_F) * 0.06f * H
+            sc = 0.9f + 0.25f * u
+            roll = -sin(u * PI_F) * 14f
+        } else if (tau < 6.2f) {
+            val h = tau - 3.4f
+            x = p2x + sin(h * 0.9f) * 6f * d
+            y = p2y + sin(h * 1.3f) * 8f * d
+            sc = 1.15f + 0.03f * sin(h * 2f)
+            roll = sin(h * 1.1f) * 4f
+            head = 26f * hwEase((tau - 3.5f) / 0.5f)
+        } else if (tau < 6.9f) {
+            val u = (tau - 6.2f) / 0.7f
+            x = p2x + W * 0.04f * hwEase(u)
+            y = p2y - 4f * d * u
+            sc = 1.18f + 0.1f * hwEase(u)
+            roll = -12f * hwEase(u)
+            head = 26f * (1f - hwEase(u))
+            flare = 0.3f + 0.7f * u
+        } else {
+            val u = ((tau - 6.9f) / 1f).coerceIn(0f, 1f)
+            val uu = u * u * (1f + 1.2f * u) / 2.2f
+            val sx0 = p2x + W * 0.04f
+            val sy0 = p2y - 4f * d
+            x = sx0 + (p3x - sx0) * uu
+            y = sy0 + (p3y - sy0) * uu - sin(u * PI_F) * 20f * d
+            sc = 1.28f - 0.75f * uu
+            al = if (u < 0.65f) 1f else max(0f, 1f - (u - 0.65f) / 0.35f)
+            roll = -28f * hwEase(min(1f, u * 2.5f))
+            flare = 1f
+        }
+        var arms = 0.15f
+        if (tau >= LAUGH_AT) arms = 0.15f + 0.85f * hwEase((tau - LAUGH_AT) / 0.4f)
+        if (tau >= 6.3f) arms = 0.15f + 0.85f * (1f - hwEase((tau - 6.3f) / 0.6f))
+        // la boca y la cabeza siguen las silabas de la carcajada
+        val lt = tau - LAUGH_AT
+        var jaw = 0f
+        var nod = 0f
+        if (lt >= 0f && lt < LAUGH_LEN) {
+            for (s in 0..4) {
+                val tt = lt - LAUGH_ON[s]
+                if (tt >= 0f && tt < LAUGH_DUR[s]) {
+                    val ph = sin(PI_F * tt / LAUGH_DUR[s])
+                    jaw = max(jaw, ph * (if (s == 4) 1f else 0.85f))
+                    nod = -ph * 7f
+                }
+            }
+            flare = 1f
+            x += sin(t * 61f) * 3f * d
+            y += cos(t * 53f) * 2.5f * d
+        }
+        crX = x
+        crY = y
+        crSc = 52f * d * sc
+        crRoll = roll
+        crAl = al
+        crHead = head + nod
+        crJaw = jaw
+        crFlare = flare
+        crArms = arms
+    }
+
+    private fun stepCreature(dt: Float) {
+        val ct = t % CYC
+        val e = if (ct >= BLAST_T) ct - BLAST_T else -1f
+        val tau = e - CRE_T0
+        if (e < 0f || tau > 8.1f) {
+            crAl = 0f
+            crWasOn = false
+            return
+        }
+        val lt = if (lite) 0.5f else 1f
+        if (tau < 0f) {
+            // humo y brasas antes de que aparezca
+            crAl = 0f
+            crWasOn = false
+            if (tau > -0.8f) {
+                crSmokeAcc += dt * 14f * lt
+                var g = 0
+                while (crSmokeAcc >= 1f && g < 4) {
+                    crSmokeAcc -= 1f
+                    g++
+                    emitSmoke(moonX + rf(-1f, 1f) * 30f * d, moonY + rf(-0.5f, 0.8f) * 30f * d, rf(-8f, 8f) * d)
+                    emitFireV(moonX + rf(-1f, 1f) * 24f * d, moonY + rf(-0.5f, 0.8f) * 24f * d, 6f * d, rf(-30f, 30f) * d, -rf(40f, 90f) * d, 1.2f)
+                }
+            }
+            return
+        }
+        val px = crX
+        val py = crY
+        creaturePose(tau)
+        if (!crWasOn || dt <= 0f) {
+            crVX = 0f
+            crVY = 0f
+            crWasOn = true
+        } else {
+            crVX = (crX - px) / dt
+            crVY = (crY - py) / dt
+        }
+        val cs = crSc
+        val dash = tau >= 6.9f
+        // el craneo arde: corona de fuego, ojos, cuerpo y capa
+        crFireAcc += dt * (95f + 70f * crFlare) * lt
+        var guard = 0
+        while (crFireAcc >= 1f && guard < 8) {
+            crFireAcc -= 1f
+            guard++
+            val a = rf(-165f, -15f) * DEG
+            crToWorld(cos(a) * 0.55f, -0.78f + sin(a) * 0.6f)
+            emitFireV(wxT, wyT, cs * rf(0.38f, 0.62f), -crVX * 0.35f + rf(-26f, 26f) * d, -rf(90f, 170f) * d - crVY * 0.3f, if (dash) 1.7f else 1f)
+            if (guard % 2 == 0) {
+                val sg = if (rnd.nextBoolean()) -1f else 1f
+                crToWorld(sg * 0.3f, -0.8f)
+                emitFireV(wxT, wyT, cs * 0.16f, -crVX * 0.3f + rf(-10f, 10f) * d, -rf(40f, 90f) * d, 0.8f)
+            }
+            if (guard % 3 == 0) {
+                val sg = if (rnd.nextBoolean()) -1f else 1f
+                crToWorld(sg * rf(0.4f, 1.25f), rf(0.1f, 1f))
+                emitFireV(wxT, wyT, cs * 0.22f, -crVX * 0.35f + rf(-14f, 14f) * d, -rf(50f, 110f) * d, 1f)
+            }
+            if (guard % 4 == 0) {
+                crToWorld(rf(-1f, 1f), 1.9f)
+                emitFireV(wxT, wyT, cs * 0.2f, -crVX * 0.4f, -rf(30f, 70f) * d, 0.9f)
+            }
+            if (dash) {
+                emitFireV(crX + rf(-0.5f, 0.5f) * cs, crY + rf(-0.2f, 1.5f) * cs, cs * 0.1f, rf(-40f, 40f) * d, rf(-60f, 40f) * d, 2.2f)
+            }
+        }
+        if (crFireAcc > 4f) crFireAcc = 0f
+        // humo: al emerger y la estela al escapar
+        val smokeRate = if (tau < 2.8f) 16f else if (dash) 55f else 0f
+        crSmokeAcc += dt * smokeRate * lt
+        var g2 = 0
+        while (crSmokeAcc >= 1f && g2 < 5) {
+            crSmokeAcc -= 1f
+            g2++
+            emitSmoke(crX + rf(-0.6f, 0.6f) * cs, crY + rf(-0.5f, 1.2f) * cs, -crVX * 0.1f + rf(-6f, 6f) * d)
+        }
+        if (crSmokeAcc > 4f) crSmokeAcc = 0f
+    }
+
+    private fun drawCreature(c: Canvas) {
+        if (crAl <= 0.02f) return
+        val cs = crSc
+        val al = crAl
+        val a255 = (al * 255f).toInt().coerceIn(0, 255)
+        val flare = crFlare
+        c.save()
+        c.translate(crX, crY)
+        c.rotate(crRoll)
+        c.scale(cs, cs)
+        // aura de fuego detras
+        c.save()
+        c.translate(0f, 0.2f)
+        c.scale(3.4f, 3.4f)
+        pFire.shader = shFireMid
+        pFire.alpha = ((0.3f + 0.25f * flare) * al * 255f).toInt().coerceIn(0, 255)
+        c.drawCircle(0f, 0f, 1f, pFire)
+        c.restore()
+        // capa hecha jirones
+        tmp.reset()
+        tmp.moveTo(-0.5f, 0.05f)
+        tmp.lineTo(-1f, 0.75f)
+        tmp.lineTo(-1.08f, 1.5f)
+        for (i in 0..6) {
+            val x = -1f + i * (2f / 6f)
+            var yb = 2.05f + 0.18f * sin(t * 3.2f + i * 1.7f)
+            if (i % 2 == 1) yb -= 0.38f
+            tmp.lineTo(x, yb)
+        }
+        tmp.lineTo(1.08f, 1.5f)
+        tmp.lineTo(1f, 0.75f)
+        tmp.lineTo(0.5f, 0.05f)
+        tmp.close()
+        pFill.shader = shCape
+        pFill.alpha = a255
+        c.drawPath(tmp, pFill)
+        pStroke.shader = null
+        pStroke.color = hc(0x88603090)
+        pStroke.alpha = (al * 0.5f * 255f).toInt().coerceIn(0, 255)
+        pStroke.strokeWidth = 0.03f
+        c.drawPath(tmp, pStroke)
+        // fuego que late en el pecho y costillas brillantes
+        c.save()
+        c.translate(0f, 0.75f)
+        c.scale(0.55f, 0.55f)
+        pFire.shader = shFireMid
+        pFire.alpha = ((0.45f + 0.3f * sin(t * 5f)) * al * 255f).toInt().coerceIn(0, 255)
+        c.drawCircle(0f, 0f, 1f, pFire)
+        c.restore()
+        for (r in 0..3) {
+            val y = 0.38f + 0.27f * r
+            val hw = 0.4f - 0.04f * r
+            tmp.reset()
+            tmp.moveTo(-hw, y)
+            tmp.quadTo(0f, y + 0.14f, hw, y)
+            pFireS.color = hc(0xFFFF8A1F)
+            pFireS.alpha = ((0.55f + 0.35f * sin(t * 4f + r)) * al * 255f).toInt().coerceIn(0, 255)
+            pFireS.strokeWidth = 0.06f
+            c.drawPath(tmp, pFireS)
+        }
+        // brazos con garras
+        val arms = crArms
+        for (side in 0..1) {
+            val sg = if (side == 0) -1f else 1f
+            val hx = sg * (1.05f + 0.25f * arms) + sg * sin(t * 3f + side) * 0.03f
+            val hy = 1f - 1.25f * arms + sin(t * 3.4f + side * 2f) * 0.04f
+            val exx = sg * (0.95f + 0.2f * arms)
+            val eyy = (0.15f + hy) * 0.5f + 0.12f
+            tmp.reset()
+            tmp.moveTo(sg * 0.5f, 0.15f)
+            tmp.lineTo(exx, eyy)
+            tmp.lineTo(hx, hy)
+            pStroke.shader = null
+            pStroke.color = hc(0xFF0D0709)
+            pStroke.alpha = a255
+            pStroke.strokeWidth = 0.17f
+            c.drawPath(tmp, pStroke)
+            pStroke.color = hc(0xFF4A3B30)
+            pStroke.alpha = a255
+            pStroke.strokeWidth = 0.045f
+            c.drawPath(tmp, pStroke)
+            pFill.shader = null
+            pFill.color = hc(0xFFD8CBB0)
+            pFill.alpha = a255
+            val base = 1.5707964f - 3.1415927f * arms
+            for (m in -1..1) {
+                val ang = base + m * 0.45f + sg * 0.2f
+                tmp.reset()
+                tmp.moveTo(hx - 0.04f, hy)
+                tmp.lineTo(hx + cos(ang) * 0.32f, hy + sin(ang) * 0.32f)
+                tmp.lineTo(hx + 0.04f, hy)
+                tmp.close()
+                c.drawPath(tmp, pFill)
+            }
+        }
+        // cabeza: cuernos, craneo carbonizado, mandibula y ojos encendidos
+        c.save()
+        c.translate(0f, -0.15f)
+        c.rotate(crHead)
+        c.translate(0f, -0.63f)
+        for (side in 0..1) {
+            c.save()
+            if (side == 1) c.scale(-1f, 1f)
+            tmp.reset()
+            tmp.moveTo(-0.34f, -0.38f)
+            tmp.quadTo(-0.95f, -0.55f, -0.8f, -1.25f)
+            tmp.quadTo(-0.62f, -0.8f, -0.2f, -0.55f)
+            tmp.close()
+            pFill.shader = null
+            pFill.color = hc(0xFF1A1310)
+            pFill.alpha = a255
+            c.drawPath(tmp, pFill)
+            pStroke.color = hc(0xFF5A4A3C)
+            pStroke.alpha = a255
+            pStroke.strokeWidth = 0.02f
+            c.drawPath(tmp, pStroke)
+            c.restore()
+        }
+        val jw = crJaw
+        // interior de la boca
+        pFill.shader = null
+        pFill.color = hc(0xFF2A0A04)
+        pFill.alpha = a255
+        rect.set(-0.32f, 0.32f, 0.32f, 0.5f + 0.3f * jw)
+        c.drawRect(rect, pFill)
+        if (jw > 0.05f) {
+            c.save()
+            c.translate(0f, 0.45f)
+            c.scale(0.4f, 0.3f)
+            pFire.shader = shFireMid
+            pFire.alpha = (jw * al * 255f).toInt().coerceIn(0, 255)
+            c.drawCircle(0f, 0f, 1f, pFire)
+            c.restore()
+        }
+        pFill.shader = shSkullDark
+        pFill.alpha = a255
+        rect.set(-0.4f, 0.3f + 0.3f * jw, 0.4f, 0.72f + 0.3f * jw)
+        c.drawRoundRect(rect, 0.12f, 0.12f, pFill)
+        c.drawCircle(0f, -0.05f, 0.62f, pFill)
+        // dientes
+        pFill.shader = null
+        pFill.color = hc(0xFFD8CBB0)
+        pFill.alpha = a255
+        for (i in 0..4) {
+            val tx = -0.28f + i * 0.14f
+            tmp.reset()
+            tmp.moveTo(tx - 0.045f, 0.3f)
+            tmp.lineTo(tx, 0.44f)
+            tmp.lineTo(tx + 0.045f, 0.3f)
+            tmp.close()
+            c.drawPath(tmp, pFill)
+            tmp.reset()
+            tmp.moveTo(tx - 0.045f, 0.3f + 0.3f * jw + 0.16f)
+            tmp.lineTo(tx, 0.3f + 0.3f * jw + 0.02f)
+            tmp.lineTo(tx + 0.045f, 0.3f + 0.3f * jw + 0.16f)
+            tmp.close()
+            c.drawPath(tmp, pFill)
+        }
+        // cuencas y ojos que brillan
+        for (side in 0..1) {
+            val sg = if (side == 0) -1f else 1f
+            tmp.reset()
+            tmp.moveTo(sg * 0.5f, -0.18f)
+            tmp.lineTo(sg * 0.14f, -0.08f)
+            tmp.lineTo(sg * 0.22f, 0.2f)
+            tmp.lineTo(sg * 0.46f, 0.1f)
+            tmp.close()
+            pFill.shader = null
+            pFill.color = hc(0xFF030102)
+            pFill.alpha = a255
+            c.drawPath(tmp, pFill)
+            c.save()
+            c.translate(sg * 0.3f, -0.04f)
+            val er0 = 0.34f * (1f + 0.25f * flare)
+            c.scale(er0, er0)
+            pFire.shader = shEye
+            pFire.alpha = ((0.85f + 0.15f * sin(t * 9f + side)) * al * 255f).toInt().coerceIn(0, 255)
+            c.drawCircle(0f, 0f, 1f, pFire)
+            c.restore()
+        }
+        // nariz y grieta ardiente en la frente
+        pFill.shader = null
+        pFill.color = hc(0xFF030102)
+        pFill.alpha = a255
+        tmp.reset()
+        tmp.moveTo(0f, 0.12f)
+        tmp.lineTo(-0.08f, 0.3f)
+        tmp.lineTo(0.08f, 0.3f)
+        tmp.close()
+        c.drawPath(tmp, pFill)
+        tmp.reset()
+        tmp.moveTo(0.05f, -0.62f)
+        tmp.lineTo(-0.02f, -0.4f)
+        tmp.lineTo(0.08f, -0.28f)
+        pFireS.color = hc(0xFFFF8A1F)
+        pFireS.alpha = ((0.6f + 0.3f * sin(t * 6f)) * al * 255f).toInt().coerceIn(0, 255)
+        pFireS.strokeWidth = 0.025f
+        c.drawPath(tmp, pFireS)
+        c.restore()
+        c.restore()
+    }
+
+    // ------------------------------------------------------------ boton de silencio
+    private fun updateMute(dt: Float) {
+        if (W <= 0f) return
+        muteT += dt
+        val s = skullS()
+        val mr = 34f * d
+        if (muteT >= 0.5f || !muteInit) {
+            muteT = 0f
+            val rr = 22f * d
+            val hh = if (bgH > 0f) bgH else H
+            var bestC = Float.MAX_VALUE
+            var bx = W - 24f * d
+            var by = bgOffY + hh * 0.3f
+            for (side in 0..1) {
+                for (j in 0..9) {
+                    val x = if (side == 0) W - 24f * d else 24f * d
+                    val y = bgOffY + hh * (0.1f + 0.08f * j)
+                    var cost = 0f
+                    for (i in 0 until btnN) {
+                        val ox = min(x + rr, btnF[i * 4 + 2]) - max(x - rr, btnF[i * 4])
+                        val oy = min(y + rr, btnF[i * 4 + 3]) - max(y - rr, btnF[i * 4 + 1])
+                        if (ox > 0f && oy > 0f) cost += ox * oy / (d * d)
+                    }
+                    for (k in 0..1) {
+                        if (abs(x - skullX(k)) < s * 2.2f && y > skY[k] - s * 2.4f && y < skY[k] + s * 1.6f) cost += 3000f
+                    }
+                    if (abs(x - moonX) < mr * 1.5f + rr && abs(y - moonY) < mr * 1.5f + rr) cost += 1500f
+                    cost += side * 40f + j * 3f
+                    if (cost < bestC) {
+                        bestC = cost
+                        bx = x
+                        by = y
+                    }
+                }
+            }
+            muteTX = bx
+            muteTY = by
+            if (!muteInit) {
+                muteX = bx
+                muteY = by
+                muteInit = true
+            }
+        }
+        muteX += (muteTX - muteX) * min(1f, dt * 3f)
+        muteY += (muteTY - muteY) * min(1f, dt * 3f)
+    }
+
+    private fun drawMute(c: Canvas) {
+        if (W <= 0f || !muteInit) return
+        val r = 17f * d
+        pFill.shader = null
+        pFill.color = hc(0xB0140A1E)
+        c.drawCircle(muteX, muteY, r, pFill)
+        pStroke.shader = null
+        pStroke.color = hc(0xCCFF9A2E)
+        pStroke.strokeWidth = 1.4f * d
+        c.drawCircle(muteX, muteY, r, pStroke)
+        c.save()
+        c.translate(muteX, muteY)
+        c.scale(d, d)
+        pFill.color = hc(0xFFFFD9A0)
+        tmp.reset()
+        tmp.moveTo(-7f, -3f)
+        tmp.lineTo(-3f, -3f)
+        tmp.lineTo(2f, -8f)
+        tmp.lineTo(2f, 8f)
+        tmp.lineTo(-3f, 3f)
+        tmp.lineTo(-7f, 3f)
+        tmp.close()
+        c.drawPath(tmp, pFill)
+        if (muted) {
+            pStroke.color = hc(0xFFFF4B3A)
+            pStroke.strokeWidth = 2.2f
+            c.drawLine(-9f, 9f, 9f, -9f, pStroke)
+        } else {
+            pStroke.color = hc(0xFFFFD9A0)
+            pStroke.strokeWidth = 1.6f
+            tmp.reset()
+            tmp.moveTo(5f, -4f)
+            tmp.quadTo(8f, 0f, 5f, 4f)
+            c.drawPath(tmp, pStroke)
+            tmp.reset()
+            tmp.moveTo(7.5f, -7f)
+            tmp.quadTo(13f, 0f, 7.5f, 7f)
+            c.drawPath(tmp, pStroke)
+        }
+        c.restore()
+    }
+
+    // ------------------------------------------------------------ sonido sincronizado
+    private fun stepSound(dt: Float) {
+        val snd = sound ?: return
+        val ct = t % CYC
+        if (ct < prevCt) prevCt = -0.001f
+        val a = prevCt
+        if (muted) rumbleOn = false
+        val crackP = if (ct < CRACK_T0) 0f else if (ct < CRACK_T1) (ct - CRACK_T0) / (CRACK_T1 - CRACK_T0) else 1f
+        for (k in 0 until 16) {
+            if (a < evT[k] && ct >= evT[k]) snd.play(k % 3, 0.2f + 0.6f * crackP)
+        }
+        for (k in 0 until 6) {
+            if (a < detT[k] && ct >= detT[k]) snd.play(2, 0.95f)
+        }
+        if (ct >= CRACK_T0 && ct < BLAST_T) {
+            if (!rumbleOn && !muted && snd.isReady()) {
+                snd.play(3, 0.1f)
+                rumbleOn = true
+            }
+            if (rumbleOn) snd.setVol(3, 0.1f + 0.5f * crackP * sqrt(crackP))
+        } else if (rumbleOn) {
+            snd.stop(3)
+            rumbleOn = false
+        }
+        if (a < CRACK_T1 && ct >= CRACK_T1) snd.play(4, 0.55f)
+        if (a < BLAST_T && ct >= BLAST_T) {
+            snd.stop(4)
+            snd.play(5, 0.95f)
+        }
+        val tc = BLAST_T + CRE_T0
+        if (a < tc + 2f && ct >= tc + 2f) snd.play(7, 0.4f)
+        if (a < tc + LAUGH_AT && ct >= tc + LAUGH_AT) snd.play(6, 0.9f)
+        if (a < tc + 6.9f && ct >= tc + 6.9f) snd.play(7, 0.7f)
+        prevCt = ct
     }
 
     // ------------------------------------------------------------------ dibujo
@@ -1352,16 +2236,20 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         }
         drawBlood(c)
         drawSmoke(c)
+        drawMoon(c)
+        drawBlast(c)
         for (k in 0..1) {
             drawSkullBody(c, skullX(k), skullY(k) + sin(t * 1.3f + k * 2f) * 1.5f * d, skullS(), if (k == 0) 14f else -14f, k * 1.9f, k, skullJaw(k * 1.9f))
         }
         if (flyer.state != 0) {
             drawSkullBody(c, flyer.x, flyer.y, flyer.r, flyer.rot, flyer.ph, 2, 0.08f + 0.08f * sin(t * 9f))
         }
+        drawCreature(c)
         drawFire(c)
         drawLurks(c)
         for (p in pumps) if (p.state != 0) drawPumpkin(c, p)
         drawBlastOverlay(c)
+        drawMute(c)
     }
 
     private fun skullJaw(ph: Float): Float {
@@ -1798,5 +2686,315 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             }
             c.restore()
         }
+    }
+}
+
+// ============================================================================
+//  Sonido: todo se sintetiza en el telefono (sin archivos), en un hilo aparte.
+//  0-2 crujidos de roca, 3 retumbo continuo, 4 crescendo, 5 explosion,
+//  6 carcajada siniestra, 7 silbido de vuelo.
+// ============================================================================
+private class HwSound {
+    private val sr = 22050
+    private val master = 0.7f
+    private val tracks = arrayOfNulls<AudioTrack>(8)
+    @Volatile private var ready = false
+    @Volatile private var dead = false
+    var muted = false
+
+    fun isReady(): Boolean = ready
+
+    fun prepare() {
+        Thread {
+            try {
+                val bufs = arrayOf(
+                    synthCreak(0.8f, 11L, 70f),
+                    synthCreak(1.2f, 23L, 55f),
+                    synthCreak(1.7f, 37L, 42f),
+                    synthRumble(),
+                    synthRiser(),
+                    synthBoom(),
+                    synthLaugh(),
+                    synthWhoosh()
+                )
+                for (i in bufs.indices) {
+                    if (!dead) {
+                        val tr = makeTrack(bufs[i], i == 3)
+                        tracks[i] = tr
+                        if (dead) {
+                            tracks[i] = null
+                            tr.release()
+                        }
+                    }
+                }
+                ready = !dead
+            } catch (e: Throwable) {
+            }
+        }.start()
+    }
+
+    private fun makeTrack(data: ShortArray, loop: Boolean): AudioTrack {
+        val attrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_GAME)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+        val fmt = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(sr)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+            .build()
+        val tr = AudioTrack.Builder()
+            .setAudioAttributes(attrs)
+            .setAudioFormat(fmt)
+            .setBufferSizeInBytes(data.size * 2)
+            .setTransferMode(AudioTrack.MODE_STATIC)
+            .build()
+        tr.write(data, 0, data.size)
+        if (loop) tr.setLoopPoints(0, data.size, -1)
+        return tr
+    }
+
+    fun play(id: Int, vol: Float) {
+        if (!ready || muted) return
+        val tr = tracks[id] ?: return
+        try {
+            tr.stop()
+            tr.reloadStaticData()
+            tr.setVolume((vol * master).coerceIn(0f, 1f))
+            tr.play()
+        } catch (e: Exception) {
+        }
+    }
+
+    fun setVol(id: Int, v: Float) {
+        if (muted) return
+        val tr = tracks[id] ?: return
+        try {
+            tr.setVolume((v * master).coerceIn(0f, 1f))
+        } catch (e: Exception) {
+        }
+    }
+
+    fun stop(id: Int) {
+        val tr = tracks[id] ?: return
+        try {
+            tr.setVolume(0f)
+            tr.stop()
+        } catch (e: Exception) {
+        }
+    }
+
+    fun stopAll() {
+        for (i in tracks.indices) stop(i)
+    }
+
+    fun release() {
+        dead = true
+        ready = false
+        for (i in tracks.indices) {
+            val tr = tracks[i]
+            tracks[i] = null
+            try {
+                tr?.stop()
+                tr?.release()
+            } catch (e: Exception) {
+            }
+        }
+    }
+
+    private fun toPcm(f: FloatArray, peak: Float): ShortArray {
+        var mx = 0.0001f
+        for (v in f) {
+            val a = abs(v)
+            if (a > mx) mx = a
+        }
+        val k = peak / mx
+        val o = ShortArray(f.size)
+        for (i in f.indices) o[i] = (f[i] * k * 32767f).toInt().coerceIn(-32767, 32767).toShort()
+        return o
+    }
+
+    // crujido de roca: ruido grave que se apaga, pulsos de friccion y un quejido bajo
+    private fun synthCreak(dur: Float, seed: Long, f0: Float): ShortArray {
+        val n = (dur * sr).toInt()
+        val f = FloatArray(n)
+        val r = java.util.Random(seed)
+        var lp1 = 0f
+        var lp2 = 0f
+        var ph = 0f
+        var burst = 0f
+        for (i in 0 until n) {
+            val t = i.toFloat() / sr
+            val u = t / dur
+            val env = (1f - u).pow(1.6f) * min(1f, t * 60f)
+            val cut = 0.02f + 0.10f * (1f - u)
+            val x = r.nextFloat() * 2f - 1f
+            lp1 += cut * (x - lp1)
+            lp2 += cut * (lp1 - lp2)
+            val pulse = 0.55f + 0.45f * sin(TAU * (18f + 6f * sin(t * 3f)) * t)
+            ph += TAU * (f0 * (1f - 0.4f * u) + 6f * sin(t * 9f)) / sr
+            if (r.nextFloat() < 0.0012f + 0.0015f * (1f - u)) burst = 1f + r.nextFloat()
+            burst *= 0.9f
+            val crackle = burst * (r.nextFloat() * 2f - 1f) * 0.6f
+            val s = (lp2 * 6f * pulse + sin(ph) * 0.3f + crackle) * env
+            f[i] = tanh(s * 0.9f)
+        }
+        return toPcm(f, 0.85f)
+    }
+
+    // retumbo grave continuo (bucle sin cortes)
+    private fun synthRumble(): ShortArray {
+        val n = 4 * sr
+        val m = sr / 5
+        val raw = FloatArray(n + m)
+        val r = java.util.Random(5L)
+        var lp1 = 0f
+        var lp2 = 0f
+        for (i in 0 until n + m) {
+            val t = i.toFloat() / sr
+            val x = r.nextFloat() * 2f - 1f
+            lp1 += 0.012f * (x - lp1)
+            lp2 += 0.012f * (lp1 - lp2)
+            val am = 0.7f + 0.3f * sin(TAU * 0.5f * t)
+            raw[i] = (lp2 * 18f + sin(TAU * 40f * t) * 0.35f + sin(TAU * 55f * t + 1f) * 0.25f) * am
+        }
+        val out = FloatArray(n)
+        for (i in 0 until n) out[i] = raw[i]
+        for (i in 0 until m) {
+            val w = i.toFloat() / m
+            out[i] = raw[i] * w + raw[n + i] * (1f - w)
+        }
+        return toPcm(out, 0.8f)
+    }
+
+    // tension creciente justo antes de la explosion
+    private fun synthRiser(): ShortArray {
+        val dur = 1.6f
+        val n = (dur * sr).toInt()
+        val f = FloatArray(n)
+        val r = java.util.Random(7L)
+        var ph = 0f
+        var lp = 0f
+        for (i in 0 until n) {
+            val t = i.toFloat() / sr
+            val u = t / dur
+            val fr = 35f * (260f / 35f).pow(u)
+            ph += TAU * fr / sr
+            val x = r.nextFloat() * 2f - 1f
+            lp += (0.02f + 0.45f * u) * (x - lp)
+            val s = (sin(ph) * 0.55f + sin(ph * 0.5f) * 0.4f + lp * 0.6f) * u.pow(1.4f)
+            f[i] = tanh(s * 1.6f)
+        }
+        return toPcm(f, 0.85f)
+    }
+
+    // estruendo: golpe seco, graves profundos y cola que se apaga en silencio
+    private fun synthBoom(): ShortArray {
+        val dur = 3.4f
+        val n = (dur * sr).toInt()
+        val f = FloatArray(n)
+        val r = java.util.Random(9L)
+        var lpN = 0f
+        var lpT = 0f
+        var phS = 0f
+        var phM = 0f
+        for (i in 0 until n) {
+            val t = i.toFloat() / sr
+            val a = 0.6f * exp(-t * 4f) + 0.03f
+            lpN += a * ((r.nextFloat() * 2f - 1f) - lpN)
+            val burst = lpN * exp(-t * 3.2f) * min(1f, t * 400f) * 2.6f
+            phS += TAU * (62f * exp(-t * 0.35f) + 24f) / sr
+            val sub = sin(phS) * exp(-t * 0.9f) * 1.1f
+            phM += TAU * (45f + 65f * exp(-t * 9f)) / sr
+            val mid = sin(phM) * exp(-t * 7f) * 0.8f
+            lpT += 0.01f * ((r.nextFloat() * 2f - 1f) - lpT)
+            val tail = lpT * (1f - exp(-t * 4f)) * exp(-t * 0.8f) * 9f
+            val fade = min(1f, (dur - t) / 0.9f)
+            f[i] = tanh((burst + sub + mid + tail) * 2.2f) * fade
+        }
+        return toPcm(f, 0.95f)
+    }
+
+    // carcajada grave: cinco silabas (ja-ja-ja-ja-jaaa) con voz gruesa y eco
+    private fun synthLaugh(): ShortArray {
+        val n = (LAUGH_LEN * sr).toInt()
+        val f = FloatArray(n)
+        val r = java.util.Random(13L)
+        val ff = floatArrayOf(700f, 1100f, 2400f)
+        val bw = floatArrayOf(90f, 110f, 160f)
+        val gw = floatArrayOf(1f, 0.6f, 0.25f)
+        val a1 = FloatArray(3)
+        val a2 = FloatArray(3)
+        for (k in 0..2) {
+            val rr = exp(-PI_F * bw[k] / sr)
+            a1[k] = -2f * rr * cos(TAU * ff[k] / sr)
+            a2[k] = rr * rr
+        }
+        val y1 = FloatArray(3)
+        val y2 = FloatArray(3)
+        var ph = 0f
+        var lpA = 0f
+        for (i in 0 until n) {
+            val t = i.toFloat() / sr
+            var src = 0f
+            for (s in 0..4) {
+                val tt = t - LAUGH_ON[s]
+                if (tt >= 0f && tt < LAUGH_DUR[s]) {
+                    val u = tt / LAUGH_DUR[s]
+                    val amp = sin(PI_F * u).pow(0.7f) * (if (s == 4) 1f else 0.9f)
+                    val f0 = if (s < 4) 150f - 12f * s - 22f * u else 135f - 70f * u + 4f * sin(tt * 38f)
+                    ph += f0 / sr
+                    val saw = 2f * (ph % 1f) - 1f
+                    val sub = 2f * ((ph * 0.5f) % 1f) - 1f
+                    val breath = (r.nextFloat() * 2f - 1f) * exp(-u * 10f) * 0.6f
+                    src = (saw + 0.45f * sub) * amp + breath
+                }
+            }
+            var y = 0f
+            for (k in 0..2) {
+                val yk = src - a1[k] * y1[k] - a2[k] * y2[k]
+                y2[k] = y1[k]
+                y1[k] = yk
+                y += yk * gw[k]
+            }
+            val sat = tanh(y * 0.12f)
+            lpA += 0.45f * (sat - lpA)
+            f[i] = lpA
+        }
+        val d1 = (0.11f * sr).toInt()
+        val d2 = (0.23f * sr).toInt()
+        val g = f.copyOf()
+        for (i in 0 until n) {
+            var v = g[i]
+            if (i >= d1) v += 0.3f * g[i - d1]
+            if (i >= d2) v += 0.16f * g[i - d2]
+            f[i] = v
+        }
+        return toPcm(f, 0.9f)
+    }
+
+    // silbido del vuelo: ruido filtrado que sube y baja
+    private fun synthWhoosh(): ShortArray {
+        val dur = 1.2f
+        val n = (dur * sr).toInt()
+        val f = FloatArray(n)
+        val r = java.util.Random(17L)
+        var y1 = 0f
+        var y2 = 0f
+        for (i in 0 until n) {
+            val t = i.toFloat() / sr
+            val u = t / dur
+            val bell = sin(PI_F * u)
+            val fc = 300f + 2200f * bell.pow(1.5f)
+            val rr = 0.97f
+            val a1 = -2f * rr * cos(TAU * fc / sr)
+            val a2 = rr * rr
+            val x = r.nextFloat() * 2f - 1f
+            val y = x - a1 * y1 - a2 * y2
+            y2 = y1
+            y1 = y
+            f[i] = y * bell * bell * 0.05f
+        }
+        return toPcm(f, 0.8f)
     }
 }
