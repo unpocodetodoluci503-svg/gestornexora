@@ -25,6 +25,8 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.exp
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
@@ -43,6 +45,21 @@ import kotlin.math.sqrt
 
 private const val TAU = 6.2831855f
 private const val DEG = 0.017453292f
+
+// Ciclo de la luna (segundos): intacta -> grietas -> carga -> explosión -> renace
+private const val CYC = 38f
+private const val CRACK_T0 = 4f
+private const val CRACK_T1 = 26f
+private const val BLAST_T = 27.6f
+
+private fun hwLerp(a: Int, b: Int, t: Float): Int {
+    val k = t.coerceIn(0f, 1f)
+    val aa = ((a ushr 24) and 255) + (((b ushr 24) and 255) - ((a ushr 24) and 255)) * k
+    val rr = ((a shr 16) and 255) + (((b shr 16) and 255) - ((a shr 16) and 255)) * k
+    val gg = ((a shr 8) and 255) + (((b shr 8) and 255) - ((a shr 8) and 255)) * k
+    val bb = (a and 255) + ((b and 255) - (a and 255)) * k
+    return (aa.toInt() shl 24) or (rr.toInt() shl 16) or (gg.toInt() shl 8) or bb.toInt()
+}
 
 private fun hc(v: Long): Int = v.toInt()
 
@@ -279,6 +296,22 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private var bgRoot: View? = null
     private var vto: ViewTreeObserver? = null
 
+    // calaveras: anclajes dinámicos para no quedar bajo los botones
+    private val skY = FloatArray(2)
+    private val skTarget = FloatArray(2)
+    private var anchorT = 0f
+    private var anchorInit = false
+    private val maxBtn = 48
+    private val btnF = FloatArray(maxBtn * 4)
+    private var btnN = 0
+
+    // luna: grietas y posición del fondo en la ventana
+    private val crackPts = FloatArray(15 * 7 * 2)
+    private val crackStart = FloatArray(15)
+    private val locBuf = IntArray(2)
+    private var bgOffX = 0f
+    private var bgOffY = 0f
+
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
         hookBackground()
         true
@@ -299,6 +332,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         pumps[1].wait = 2.8f
         pumps[2].wait = 5f
         flyer.wait = 4f
+        buildCracks()
         for (l in lurks) l.wait = rf(0.5f, 4f)
     }
 
@@ -396,6 +430,11 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 root.background = HwBg(this)
                 bgRoot = root
             }
+            if (bgRoot === root) {
+                root.getLocationInWindow(locBuf)
+                bgOffX = locBuf[0].toFloat()
+                bgOffY = locBuf[1].toFloat()
+            }
         } catch (e: Exception) {
         }
     }
@@ -456,6 +495,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             ex[i] += sin(t * 1.4f + eph[i]) * 14f * d * dt
             if (ey[i] < -12f * d) respawnEmber(i, false)
         }
+        updateAnchors(dt)
         stepSmoke(dt)
         stepLurks(dt)
         stepPumpkins(dt)
@@ -464,9 +504,57 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         stepBolt(dt)
     }
 
-    private fun skullS(): Float = 44f * d
-    private fun skullX(i: Int): Float = if (i == 0) skullS() * 0.95f else W - skullS() * 0.95f
-    private fun skullY(): Float = H - botInset + skullS() * 0.12f
+    private fun skullS(): Float = 34f * d
+    private fun skullX(i: Int): Float = if (i == 0) skullS() * 0.55f else W - skullS() * 0.55f
+    private fun skullY(i: Int): Float = skY[i]
+
+    // Elige a qué altura se asoma cada calavera: lejos de los botones y de la barra de abajo
+    private fun updateAnchors(dt: Float) {
+        if (W <= 0f) return
+        anchorT += dt
+        if (anchorT >= 0.25f || !anchorInit) {
+            anchorT = 0f
+            val s = skullS()
+            val top = H * 0.26f + s * 2.2f
+            val bot = H - botInset - s * 1.7f
+            val pref0 = H * 0.7f
+            val pref1 = H * 0.46f
+            var best0 = pref0
+            for (k in 0..1) {
+                var bestY = if (k == 0) pref0 else pref1
+                if (bot > top) {
+                    var bestC = Float.MAX_VALUE
+                    for (j in 0..13) {
+                        val y = top + (bot - top) * j / 13f
+                        val x0 = if (k == 0) 0f else W - s * 2.1f
+                        val x1 = if (k == 0) s * 2.1f else W
+                        val y0 = y - s * 2.2f
+                        val y1 = y + s * 1.35f
+                        var cost = 0f
+                        for (i in 0 until btnN) {
+                            val ox = min(x1, btnF[i * 4 + 2]) - max(x0, btnF[i * 4])
+                            val oy = min(y1, btnF[i * 4 + 3]) - max(y0, btnF[i * 4 + 1])
+                            if (ox > 0f && oy > 0f) cost += ox * oy / (d * d)
+                        }
+                        cost += abs(y - (if (k == 0) pref0 else pref1)) / H * 300f
+                        if (k == 1 && abs(y - best0) < H * 0.22f) cost += 2000f
+                        if (cost < bestC) {
+                            bestC = cost
+                            bestY = y
+                        }
+                    }
+                }
+                skTarget[k] = bestY
+                if (k == 0) best0 = bestY
+            }
+            if (!anchorInit) {
+                skY[0] = skTarget[0]
+                skY[1] = skTarget[1]
+                anchorInit = true
+            }
+        }
+        for (k in 0..1) skY[k] += (skTarget[k] - skY[k]) * min(1f, dt * 3f)
+    }
 
     private fun stepSmoke(dt: Float) {
         for (i in 0 until maxSm) {
@@ -483,7 +571,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         smokeT += dt
         if (smokeT > (if (lite) 0.5f else 0.26f)) {
             smokeT = 0f
-            for (k in 0..1) emitSmoke(skullX(k) + rf(-8f, 8f) * d, skullY() - skullS() * 1.5f, if (k == 0) 5f * d else -5f * d)
+            for (k in 0..1) emitSmoke(skullX(k) + rf(-8f, 8f) * d, skullY(k) - skullS() * 1.5f, if (k == 0) 5f * d else -5f * d)
         }
     }
 
@@ -535,8 +623,8 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         while (fireAcc >= 1f && guard < 6) {
             fireAcc -= 1f
             guard++
-            emitSkullFire(skullX(0), skullY(), s, 12f)
-            emitSkullFire(skullX(1), skullY(), s, -12f)
+            emitSkullFire(skullX(0), skullY(0), s, 14f)
+            emitSkullFire(skullX(1), skullY(1), s, -14f)
             if (flyer.state != 0) emitSkullFire(flyer.x, flyer.y, flyer.r, flyer.rot)
         }
         if (fireAcc > 3f) fireAcc = 0f
@@ -842,6 +930,13 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         pBg.alpha = 255
         c.drawRect(0f, 0f, w, h, pBg)
         pBg.shader = null
+        val ct = t % CYC
+        val eBlast = if (ct >= BLAST_T) ct - BLAST_T else -1f
+        c.save()
+        if (eBlast >= 0f && eBlast < 0.8f) {
+            val sk = 1f - eBlast / 0.8f
+            c.translate(sin(t * 83f) * 9f * d * sk, cos(t * 71f) * 7f * d * sk)
+        }
         // estrellas
         pFill.shader = null
         for (i in 0 until 46) {
@@ -850,29 +945,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             pFill.alpha = (tw.coerceIn(0f, 1f) * 190f).toInt()
             c.drawCircle(hwHash(i, 1) * w, hwHash(i, 2) * h * 0.6f, (0.6f + 1f * hwHash(i, 4)) * d, pFill)
         }
-        // luna
-        val mx = w * 0.78f
-        val my = h * 0.17f
-        val mr = 34f * d
-        c.save()
-        c.translate(mx, my)
-        c.scale(mr * 3.4f, mr * 3.4f)
-        pGlow.shader = shGlowOrange
-        pGlow.alpha = ((0.75f + 0.2f * sin(t * 0.9f)) * 255f).toInt()
-        c.drawCircle(0f, 0f, 1f, pGlow)
-        c.restore()
-        c.save()
-        c.translate(mx, my)
-        c.scale(mr, mr)
-        pFill.shader = shMoon
-        pFill.alpha = 255
-        c.drawCircle(0f, 0f, 1f, pFill)
-        pFill.shader = null
-        pFill.color = hc(0x30B4601C)
-        c.drawCircle(-0.3f, -0.2f, 0.22f, pFill)
-        c.drawCircle(0.35f, 0.1f, 0.28f, pFill)
-        c.drawCircle(-0.05f, 0.45f, 0.16f, pFill)
-        c.restore()
+        drawMoon(c, w, h, ct)
         // nubes oscuras
         for (k in 0..1) {
             val span = w + 260f * d
@@ -897,6 +970,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             val s = (7f + 7f * hwHash(i, 14)) * d
             drawBat(c, bx, by, s, sin(t * (11f + i) + i))
         }
+        if (eBlast >= 0f) drawBlast(c, w, h, eBlast)
         // relámpago
         if (boltAge < 0.5f) {
             val k = if (boltAge < 0.08f) 1f else if (boltAge < 0.14f) 0.2f else if (boltAge < 0.22f) 0.9f else max(0f, 1f - (boltAge - 0.22f) / 0.28f)
@@ -938,6 +1012,319 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             c.drawCircle(0f, 0f, 1f, pGlow)
             c.restore()
         }
+        c.restore()
+    }
+
+    // ------------------------------------------------------------ luna y explosión
+    private fun buildCracks() {
+        for (i in 0 until 10) {
+            val a = i * TAU / 10f + (hwHash(i, 91) - 0.5f) * 0.5f
+            val r0 = 0.04f + 0.2f * hwHash(i, 92)
+            genCrack(i, cos(a) * r0, sin(a) * r0, a, 0.95f - r0, i * 17)
+            crackStart[i] = 0.5f * hwHash(i, 93)
+        }
+        for (b in 0 until 5) {
+            val parent = b * 2
+            val px = crackPts[(parent * 7 + 3) * 2]
+            val py = crackPts[(parent * 7 + 3) * 2 + 1]
+            val pa = atan2(py - crackPts[(parent * 7 + 2) * 2 + 1], px - crackPts[(parent * 7 + 2) * 2])
+            val ang = pa + (if (b % 2 == 0) 0.7f else -0.7f)
+            genCrack(10 + b, px, py, ang, 0.55f, 200 + b * 13)
+            crackStart[10 + b] = 0.35f + 0.3f * hwHash(b, 94)
+        }
+    }
+
+    private fun genCrack(idx: Int, sx0: Float, sy0: Float, ang: Float, len: Float, seed: Int) {
+        var x = sx0
+        var y = sy0
+        var a = ang
+        for (k in 0..6) {
+            crackPts[(idx * 7 + k) * 2] = x
+            crackPts[(idx * 7 + k) * 2 + 1] = y
+            a += (hwHash(seed + k, 95) - 0.5f) * 0.9f
+            x += cos(a) * len / 6f
+            y += sin(a) * len / 6f
+        }
+    }
+
+    private fun drawMoon(c: Canvas, w: Float, h: Float, ct: Float) {
+        val mr = 34f * d
+        val crackP = if (ct < CRACK_T0) 0f else if (ct < CRACK_T1) (ct - CRACK_T0) / (CRACK_T1 - CRACK_T0) else 1f
+        val charge = if (ct >= CRACK_T1 && ct < BLAST_T) (ct - CRACK_T1) / (BLAST_T - CRACK_T1) else 0f
+        val e = if (ct >= BLAST_T) ct - BLAST_T else -1f
+        val reb = if (e >= 6.5f) ((e - 6.5f) / 3.9f).coerceIn(0f, 1f) else 0f
+        if (e >= 0f && reb <= 0f) return
+        val intensity = crackP * crackP
+        val pulse = sin(t * (0.9f + 6f * crackP + 8f * charge))
+        var mx = w * 0.78f
+        var my = h * 0.17f
+        if (e < 0f && crackP > 0.25f) {
+            val amp = (0.3f + 2.2f * intensity + 4f * charge) * d
+            mx += sin(t * 61f) * amp
+            my += cos(t * 47f) * amp
+        }
+        val sc = if (e < 0f) 1f else 0.55f + 0.45f * hwEase(reb)
+        val al = if (e < 0f) 1f else hwEase(reb)
+        // halo
+        c.save()
+        c.translate(mx, my)
+        val hr = mr * (3.4f + 1.2f * intensity + 2f * charge) * sc
+        c.scale(hr, hr)
+        pGlow.shader = shGlowOrange
+        pGlow.alpha = ((0.75f + 0.2f * pulse) * al * 255f).toInt().coerceIn(0, 255)
+        c.drawCircle(0f, 0f, 1f, pGlow)
+        c.restore()
+        if (crackP > 0.3f || charge > 0f) {
+            c.save()
+            c.translate(mx, my)
+            c.scale(mr * (1.8f + 1.5f * charge), mr * (1.8f + 1.5f * charge))
+            pFire.shader = shFireHot
+            pFire.alpha = ((intensity * 0.7f + charge * 0.3f) * (0.7f + 0.3f * pulse) * al * 255f).toInt().coerceIn(0, 255)
+            c.drawCircle(0f, 0f, 1f, pFire)
+            c.restore()
+        }
+        // disco
+        c.save()
+        c.translate(mx, my)
+        c.scale(mr * sc, mr * sc)
+        pFill.shader = shMoon
+        pFill.alpha = (al * 255f).toInt().coerceIn(0, 255)
+        c.drawCircle(0f, 0f, 1f, pFill)
+        pFill.shader = null
+        pFill.color = hc(0x30B4601C)
+        c.drawCircle(-0.3f, -0.2f, 0.22f, pFill)
+        c.drawCircle(0.35f, 0.1f, 0.28f, pFill)
+        c.drawCircle(-0.05f, 0.45f, 0.16f, pFill)
+        // grietas que brillan
+        if (e < 0f && crackP > 0f) {
+            val gl = (0.35f + 0.65f * crackP + 0.3f * charge) * (0.8f + 0.2f * pulse)
+            for (i in 0 until 15) {
+                val g = ((crackP - crackStart[i]) / 0.3f).coerceIn(0f, 1f)
+                if (g <= 0f) continue
+                val total = g * 6f
+                val full = total.toInt()
+                tmp.reset()
+                tmp.moveTo(crackPts[i * 14], crackPts[i * 14 + 1])
+                for (k in 1..min(full, 6)) tmp.lineTo(crackPts[(i * 7 + k) * 2], crackPts[(i * 7 + k) * 2 + 1])
+                if (full < 6) {
+                    val fr = total - full
+                    val a0 = (i * 7 + full) * 2
+                    val b0 = (i * 7 + full + 1) * 2
+                    tmp.lineTo(crackPts[a0] + (crackPts[b0] - crackPts[a0]) * fr, crackPts[a0 + 1] + (crackPts[b0 + 1] - crackPts[a0 + 1]) * fr)
+                }
+                pStroke.shader = null
+                pStroke.color = hc(0xCC2A0E00)
+                pStroke.strokeWidth = 3.4f * d / mr
+                c.drawPath(tmp, pStroke)
+                pStroke.color = hc(0xFFFFB43C)
+                pStroke.alpha = (gl * 0.55f * 255f).toInt().coerceIn(0, 255)
+                pStroke.strokeWidth = 6f * d / mr
+                c.drawPath(tmp, pStroke)
+                pStroke.color = hc(0xFFFFF1B8)
+                pStroke.alpha = (gl * 255f).toInt().coerceIn(0, 255)
+                pStroke.strokeWidth = 1.7f * d / mr
+                c.drawPath(tmp, pStroke)
+            }
+            // energía que se escapa por las grietas
+            pFill.shader = null
+            for (j in 0 until 14) {
+                val ci = j % 10
+                val u = (t * 0.9f + hwHash(j, 96)) % 1f
+                val ex0 = crackPts[(ci * 7 + 6) * 2]
+                val ey0 = crackPts[(ci * 7 + 6) * 2 + 1]
+                pFill.color = hc(0xFFFFE08A)
+                pFill.alpha = ((1f - u) * intensity * 255f).toInt().coerceIn(0, 255)
+                c.drawCircle(ex0 * (1f + u * 0.5f), ey0 * (1f + u * 0.5f), 0.05f * (1f - u), pFill)
+            }
+        }
+        // sobrecalentamiento antes de estallar
+        if (charge > 0f) {
+            pFire.shader = shFireHot
+            pFire.alpha = (charge * 255f).toInt().coerceIn(0, 255)
+            c.drawCircle(0f, 0f, 1.05f, pFire)
+        }
+        c.restore()
+    }
+
+    private fun drawBlast(c: Canvas, w: Float, h: Float, e: Float) {
+        val mx = w * 0.78f
+        val my = h * 0.17f
+        val mr = 34f * d
+        // nebulosa de energía
+        if (e < 7.5f) {
+            val na = if (e < 0.4f) e / 0.4f else max(0f, 1f - (e - 0.4f) / 7f)
+            val ns = mr * (2.5f + 7f * (1f - exp(-0.9f * e)))
+            c.save()
+            c.translate(mx, my)
+            c.scale(ns, ns)
+            pGlow.shader = shGlowViolet
+            pGlow.alpha = (na * 0.8f * 255f).toInt().coerceIn(0, 255)
+            c.drawCircle(0f, 0f, 1f, pGlow)
+            c.scale(0.6f, 0.6f)
+            pGlow.shader = shGlowOrange
+            pGlow.alpha = (na * 255f).toInt().coerceIn(0, 255)
+            c.drawCircle(0f, 0f, 1f, pGlow)
+            c.restore()
+        }
+        // núcleo que queda brillando
+        if (e < 6.5f) {
+            val ac = (1f - e / 6.5f) * 0.55f
+            val cr = mr * (0.4f + 0.2f * sin(t * 3f))
+            c.save()
+            c.translate(mx, my)
+            c.scale(cr, cr)
+            pFire.shader = shFireMid
+            pFire.alpha = (ac * 255f).toInt().coerceIn(0, 255)
+            c.drawCircle(0f, 0f, 1f, pFire)
+            c.restore()
+        }
+        // rayos de luz
+        if (e < 1.6f) {
+            val ra = 1f - e / 1.6f
+            val rl = mr * 10f * (1f - exp(-3.5f * e))
+            pFire.shader = null
+            pFire.color = hc(0xFFFFD27A)
+            pFire.alpha = (ra * ra * 200f).toInt().coerceIn(0, 255)
+            val rot = e * 0.6f
+            for (i in 0 until 14) {
+                val a = rot + i * TAU / 14f
+                val wd = 0.045f * (1f + (i % 3) * 0.5f)
+                val len = rl * (0.6f + 0.4f * hwHash(i, 97))
+                tmp.reset()
+                tmp.moveTo(mx, my)
+                tmp.lineTo(mx + cos(a - wd) * len, my + sin(a - wd) * len)
+                tmp.lineTo(mx + cos(a + wd) * len, my + sin(a + wd) * len)
+                tmp.close()
+                c.drawPath(tmp, pFire)
+            }
+        }
+        // ondas de choque
+        for (r in 0..2) {
+            val ee = e - r * 0.12f
+            if (ee < 0f || ee > 2.2f) continue
+            val u = ee / 2.2f
+            val eo = 1f - (1f - u) * (1f - u) * (1f - u)
+            val rad = mr * (0.8f + 12f * eo)
+            val a = (1f - u) * (1f - u)
+            val wd = (10f - 8f * u) * d
+            pStroke.shader = null
+            pStroke.color = if (r == 1) hc(0xFFB45CFF) else hc(0xFFFF9A2E)
+            pStroke.alpha = (a * 0.35f * 255f).toInt().coerceIn(0, 255)
+            pStroke.strokeWidth = wd * 2.5f
+            c.drawCircle(mx, my, rad, pStroke)
+            pStroke.color = hc(0xFFFFF4D0)
+            pStroke.alpha = (a * 255f).toInt().coerceIn(0, 255)
+            pStroke.strokeWidth = wd
+            c.drawCircle(mx, my, rad, pStroke)
+        }
+        // fragmentos de la luna
+        if (e < 6.2f) {
+            val heat = max(0f, 1f - e / 3.2f)
+            val fade = if (e < 3.5f) 1f else max(0f, 1f - (e - 3.5f) / 2.7f)
+            for (i in 0 until 16) {
+                val big = i < 6
+                val ang0 = hwHash(i, 101) * TAU
+                val r0 = (if (big) 0.25f else 0.6f) * mr * hwHash(i, 102)
+                val dirA = ang0 + (hwHash(i, 103) - 0.5f) * 0.8f
+                val speed = (if (big) 150f else 260f + 260f * hwHash(i, 104)) * d
+                val travel = speed * (1f - exp(-1.5f * e)) / 1.5f
+                val px = mx + cos(ang0) * r0 + cos(dirA) * travel
+                val py = my + sin(ang0) * r0 + sin(dirA) * travel + 16f * d * e * e
+                val sz = mr * (if (big) 0.42f + 0.2f * hwHash(i, 105) else 0.14f + 0.12f * hwHash(i, 106))
+                val rot = (hwHash(i, 107) - 0.5f) * 16f * e * 57.2958f
+                c.save()
+                c.translate(px, py)
+                c.rotate(rot)
+                if (big && heat > 0f) {
+                    c.save()
+                    c.scale(sz * 2.2f, sz * 2.2f)
+                    pFire.shader = shFireHot
+                    pFire.alpha = (heat * fade * 170f).toInt().coerceIn(0, 255)
+                    c.drawCircle(0f, 0f, 1f, pFire)
+                    c.restore()
+                }
+                tmp.reset()
+                for (v in 0..3) {
+                    val av = v * TAU / 4f + (hwHash(i * 4 + v, 108) - 0.5f) * 1.3f
+                    val rv = sz * (0.65f + 0.35f * hwHash(i * 4 + v, 109))
+                    if (v == 0) tmp.moveTo(cos(av) * rv, sin(av) * rv) else tmp.lineTo(cos(av) * rv, sin(av) * rv)
+                }
+                tmp.close()
+                pFill.shader = null
+                pFill.color = hwLerp(hc(0xFF5A3418), hc(0xFFFFC27A), heat)
+                pFill.alpha = (fade * 255f).toInt().coerceIn(0, 255)
+                c.drawPath(tmp, pFill)
+                pStroke.shader = null
+                pStroke.color = hwLerp(hc(0xFFB43A0A), hc(0xFFFFF0C0), heat)
+                pStroke.alpha = (fade * 255f).toInt().coerceIn(0, 255)
+                pStroke.strokeWidth = (1.6f + 2f * heat) * d
+                c.drawPath(tmp, pStroke)
+                c.restore()
+            }
+        }
+        // chispas de energía
+        if (e < 3.8f) {
+            for (i in 0 until 40) {
+                val life = 1.2f + 2.4f * hwHash(i, 111)
+                if (e > life) continue
+                val u = e / life
+                val a = hwHash(i, 112) * TAU
+                val sp = (220f + 420f * hwHash(i, 113)) * d
+                val trav = sp * (1f - exp(-1.8f * e)) / 1.8f
+                val tt = max(0f, e - 0.05f)
+                val trav2 = sp * (1f - exp(-1.8f * tt)) / 1.8f
+                pStroke.shader = null
+                pStroke.color = hwLerp(hc(0xFFFFF4D0), hc(0xFFFF4A1A), u)
+                pStroke.alpha = ((1f - u) * 255f).toInt().coerceIn(0, 255)
+                pStroke.strokeWidth = (2.4f - 1.4f * u) * d
+                c.drawLine(mx + cos(a) * trav2, my + sin(a) * trav2 + 30f * d * tt * tt, mx + cos(a) * trav, my + sin(a) * trav + 30f * d * e * e, pStroke)
+            }
+        }
+        // renacimiento: la energía vuelve a juntarse en la luna
+        if (e >= 6.5f) {
+            val reb = ((e - 6.5f) / 3.9f).coerceIn(0f, 1f)
+            pFill.shader = null
+            for (i in 0 until 28) {
+                val a = hwHash(i, 120) * TAU
+                val r0 = mr * (3f + 5f * hwHash(i, 121))
+                val q = hwEase(min(1f, max(0f, reb * 1.3f - hwHash(i, 122) * 0.3f)))
+                val dist = r0 * (1f - q)
+                pFill.color = hc(0xFFE9D6FF)
+                pFill.alpha = (q * (1f - q) * 4f * 255f).toInt().coerceIn(0, 255)
+                c.drawCircle(mx + cos(a) * dist, my + sin(a) * dist, 2.2f * d, pFill)
+            }
+            if (reb > 0.85f) {
+                val u = (reb - 0.85f) / 0.15f
+                pStroke.shader = null
+                pStroke.color = hc(0xFFFFE2A8)
+                pStroke.alpha = ((1f - u) * 200f).toInt().coerceIn(0, 255)
+                pStroke.strokeWidth = 3f * d
+                c.drawCircle(mx, my, mr * (1f + u * 2.5f), pStroke)
+            }
+        }
+    }
+
+    // destello y onda que cruzan toda la pantalla (sin tapar nada)
+    private fun drawBlastOverlay(c: Canvas) {
+        val ct = t % CYC
+        if (ct < BLAST_T) return
+        val e = ct - BLAST_T
+        if (e < 0.6f) {
+            val k = 1f - e / 0.6f
+            pFill.shader = null
+            pFill.color = hc(0xFFFFE6C0)
+            pFill.alpha = (k * k * 70f).toInt().coerceIn(0, 255)
+            c.drawRect(0f, 0f, W, H, pFill)
+        }
+        if (e < 1.4f && bgRoot != null) {
+            val u = e / 1.4f
+            val rad = W * 1.3f * (1f - (1f - u) * (1f - u))
+            pStroke.shader = null
+            pStroke.color = hc(0xFFFFD27A)
+            pStroke.alpha = ((1f - u) * 110f).toInt().coerceIn(0, 255)
+            pStroke.strokeWidth = 3f * d
+            c.drawCircle(bgOffX + bgW * 0.78f, bgOffY + bgH * 0.17f, rad, pStroke)
+        }
     }
 
     // ------------------------------------------------------------------ dibujo
@@ -955,6 +1342,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         drawWebs(c)
         drawEmbers(c)
         cardN = 0
+        btnN = 0
         val par = parent as? ViewGroup
         if (par != null) {
             for (i in 0 until par.childCount) {
@@ -965,7 +1353,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         drawBlood(c)
         drawSmoke(c)
         for (k in 0..1) {
-            drawSkullBody(c, skullX(k), skullY() + sin(t * 1.3f + k * 2f) * 1.5f * d, skullS(), if (k == 0) 12f else -12f, k * 1.9f, k, skullJaw(k * 1.9f))
+            drawSkullBody(c, skullX(k), skullY(k) + sin(t * 1.3f + k * 2f) * 1.5f * d, skullS(), if (k == 0) 14f else -14f, k * 1.9f, k, skullJaw(k * 1.9f))
         }
         if (flyer.state != 0) {
             drawSkullBody(c, flyer.x, flyer.y, flyer.r, flyer.rot, flyer.ph, 2, 0.08f + 0.08f * sin(t * 9f))
@@ -973,6 +1361,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         drawFire(c)
         drawLurks(c)
         for (p in pumps) if (p.state != 0) drawPumpkin(c, p)
+        drawBlastOverlay(c)
     }
 
     private fun skullJaw(ph: Float): Float {
@@ -1287,6 +1676,14 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         val hv = v.height.toFloat()
         if (wv <= 0f || hv <= 0f) return
         if (x > cr || y > cb || x + wv < cl || y + hv < ct) return
+        if (btnN < maxBtn && wv < W * 0.95f && v.hasOnClickListeners()) {
+            val bi = btnN * 4
+            btnF[bi] = max(x, cl)
+            btnF[bi + 1] = max(y, ct)
+            btnF[bi + 2] = min(x + wv, cr)
+            btnF[bi + 3] = min(y + hv, cb)
+            btnN++
+        }
         val bg = v.background
         if (cardN < maxCards && bg is GradientDrawable && wv >= 140f * d && hv >= 40f * d) {
             val cs = bg.getColor()
