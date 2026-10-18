@@ -332,7 +332,23 @@ class MainActivity : Activity() {
                 Seccion("Novedades", listOf(
                     "Extracción de archivos RAR 5, con vista del contenido, contraseña y las mismas opciones que los demás formatos")),
                 Seccion("Mejoras", listOf(
-                    "Nexora incluye ahora el motor de 7-Zip para leer RAR 5, por eso la app pesa más"))))
+                    "Nexora incluye ahora el motor de 7-Zip para leer RAR 5, por eso la app pesa más")))),
+        Entrada("0.7.0", null, "Convertidor beta 2",
+            "El convertidor reduce imágenes, convierte solo las páginas de PDF que elijas, ordena las imágenes al unirlas y trabaja más rápido con varios archivos.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Tamaño de las imágenes: original, 2048, 1280 u 800 px de lado mayor, sin ampliar nunca",
+                    "PDF a imágenes solo de las páginas que elijas (por ejemplo 1-3, 7), mostrando cuántas tiene el PDF",
+                    "Orden al unir imágenes en un PDF: como las agregaste, por nombre (con números naturales) o por fecha",
+                    "Resumen final con el peso antes y después de convertir",
+                    "Opción de conservar la fecha del archivo original")),
+                Seccion("Mejoras visuales", listOf(
+                    "Etiqueta BETA 2 en el convertidor y progreso por «convertidos X de Y»")),
+                Seccion("Mejoras", listOf(
+                    "Varias imágenes se convierten a la vez (hasta 3 según el teléfono y el tamaño de las fotos); si falta memoria, se reintentan de a una",
+                    "Menos memoria: las imágenes se liberan en cuanto se usan y las fotos que se reducen se leen ya reducidas",
+                    "La vista previa se guarda: la pantalla abre más rápido al cambiar opciones",
+                    "Los archivos nuevos se escriben por bloques, más rápido")))) 
     )
 
     private val pendientes = listOf(
@@ -408,6 +424,12 @@ class MainActivity : Activity() {
     private var convBg = Color.WHITE
     private var convMerge = true
     private var convName = ""
+    private var convSize = 0
+    private var convOrder = 0
+    private var convKeepDate = false
+    private var convPages = ""
+    private val convPool = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r).also { it.isDaemon = true } }
+    private val pdfCountCache = HashMap<String, Int>()
     @Volatile private var convCancel = false
     private var converting = false
     private var convHead: TextView? = null
@@ -1808,6 +1830,96 @@ class MainActivity : Activity() {
 
     private fun baseOf(f: File): String = f.name.removeSuffix(extOf(f.name))
 
+    // orden natural: img2 va antes que img10
+    private fun natCmp(a: String, b: String): Int {
+        val x = a.lowercase()
+        val y = b.lowercase()
+        var i = 0
+        var j = 0
+        while (i < x.length && j < y.length) {
+            val cx = x[i]
+            val cy = y[j]
+            if (cx.isDigit() && cy.isDigit()) {
+                var ei = i
+                while (ei < x.length && x[ei].isDigit()) ei++
+                var ej = j
+                while (ej < y.length && y[ej].isDigit()) ej++
+                val nx = x.substring(i, ei).trimStart('0')
+                val ny = y.substring(j, ej).trimStart('0')
+                if (nx.length != ny.length) return nx.length - ny.length
+                val cmp = nx.compareTo(ny)
+                if (cmp != 0) return cmp
+                i = ei
+                j = ej
+            } else {
+                if (cx != cy) return cx.compareTo(cy)
+                i++
+                j++
+            }
+        }
+        return (x.length - i) - (y.length - j)
+    }
+
+    // orden de las imágenes cuando se unen en un solo PDF
+    private fun convOrdered(): List<File> {
+        if (convOrder == 0 || convFiles.size < 2 || !convMerge || convTarget != 3) return convFiles
+        if (!convFiles.all { convKind(it) == 1 }) return convFiles
+        return if (convOrder == 1) convFiles.sortedWith { a, b -> natCmp(a.name, b.name) } else convFiles.sortedBy { it.lastModified() }
+    }
+
+    // "1-3, 7, 9-" -> páginas (desde 0); null si no es válido
+    private fun parsePages(s: String, n: Int): List<Int>? {
+        val t = s.trim()
+        if (t.isEmpty()) return null
+        val out = ArrayList<Int>()
+        val seen = HashSet<Int>()
+        for (part in t.split(',', ';')) {
+            val p = part.trim()
+            if (p.isEmpty()) continue
+            var a: Int
+            var b: Int
+            if (p.contains('-')) {
+                val sp = p.split('-')
+                if (sp.size != 2) return null
+                val s0 = sp[0].trim()
+                val s1 = sp[1].trim()
+                a = if (s0.isEmpty()) 1 else (s0.toIntOrNull() ?: return null)
+                b = if (s1.isEmpty()) n else (s1.toIntOrNull() ?: return null)
+                if (a > b) return null
+            } else {
+                a = p.toIntOrNull() ?: return null
+                b = a
+            }
+            if (a < 1 || b > n) return null
+            for (k in a..b) if (seen.add(k)) out.add(k - 1)
+        }
+        return if (out.isEmpty()) null else out
+    }
+
+    private fun pdfPageCount(f: File): Int {
+        val key = f.path + ":" + f.lastModified()
+        val hit = pdfCountCache[key]
+        if (hit != null) return hit
+        var n = -1
+        try {
+            val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+            try {
+                val rr = PdfRenderer(pfd)
+                try {
+                    n = rr.pageCount
+                } finally {
+                    rr.close()
+                }
+            } finally {
+                pfd.close()
+            }
+        } catch (e: Throwable) {
+            n = -1
+        }
+        pdfCountCache[key] = n
+        return n
+    }
+
     private fun cleanName(s: String): String = s.trim().replace(Regex("[\\\\/:*?\"<>|]"), "_")
 
     private fun openConverter(files: List<File>?) {
@@ -1817,6 +1929,7 @@ class MainActivity : Activity() {
             convDest = null
             convTarget = 0
             convName = ""
+            convPages = ""
             selected.clear()
         }
         showConverter()
@@ -1827,7 +1940,8 @@ class MainActivity : Activity() {
         val nm = cleanName(convName)
         val jobs = ArrayList<ConvJob>()
         if (kind == 1 && convTarget == 3 && convMerge && n > 1) {
-            jobs.add(ConvJob(n.toString() + " imágenes en un solo PDF", ArrayList(convFiles), if (nm.isEmpty()) baseOf(convFiles[0]) + "_unido" else nm))
+            val ord = convOrdered()
+            jobs.add(ConvJob(n.toString() + " imágenes en un solo PDF", ArrayList(ord), if (nm.isEmpty()) baseOf(ord[0]) + "_unido" else nm))
         } else {
             for ((i, f) in convFiles.withIndex()) {
                 val base = if (nm.isEmpty()) baseOf(f) else if (n == 1) nm else nm + "_" + (i + 1)
@@ -2065,9 +2179,18 @@ class MainActivity : Activity() {
         val destDir = convDest ?: convFiles.firstOrNull()?.parentFile ?: dir
         val amber = c(0xFFFBBF24)
 
+        val bhead = LinearLayout(this)
+        bhead.gravity = Gravity.CENTER_VERTICAL
+        val beta2 = txt("BETA 2", 10f, ACC2, true)
+        beta2.letterSpacing = 0.12f
+        beta2.setPadding(dp(8), dp(3), dp(8), dp(3))
+        beta2.background = rounded(alpha(ACC2, 0x22), 20)
+        bhead.addView(beta2, lp(-2, -2))
+        bhead.addView(txt("Ahora con tamaño de imagen, páginas de PDF y más velocidad", 12f, MUTE), lp(0, -2, 1f).also { it.leftMargin = dp(10) })
+        b.addView(bhead)
         b.addView(sectionTitle("Archivos de origen"))
         if (convFiles.isEmpty()) b.addView(txt("Aún no hay archivos. Agrega imágenes, audios o PDF.", 13f, MUTE))
-        for (f in convFiles) b.addView(convSourceRow(f), lp(-1, -2).also { it.topMargin = dp(6) })
+        for (f in convOrdered()) b.addView(convSourceRow(f), lp(-1, -2).also { it.topMargin = dp(6) })
         val add = ghostButton("Agregar archivos")
         add.setOnClickListener {
             pickFilesSheet { picked ->
@@ -2087,11 +2210,32 @@ class MainActivity : Activity() {
             val jobs = planJobs(kind)
             val ext = convExt(kind, convTarget)
             val used = HashSet<String>()
+            val pgl = if (kind == 3 && convFiles.size == 1 && !convPages.isBlank()) parsePages(convPages, 100000) else null
+            val firstPg = if (pgl != null && pgl.isNotEmpty()) pgl[0] + 1 else 1
             for (j in jobs.take(8)) {
-                val out = if (kind == 3) j.outBase + "_p001." + ext + "  (una imagen por página)" else simName(destDir, j.outBase, ext, used)
+                val out = if (kind == 3) j.outBase + "_p" + firstPg.toString().padStart(3, '0') + "." + ext + "  (una imagen por página)" else simName(destDir, j.outBase, ext, used)
                 previewBox.addView(convPreviewRow(j.label, out), lp(-1, -2).also { it.topMargin = dp(8) })
             }
             if (jobs.size > 8) previewBox.addView(txt("… y " + (jobs.size - 8) + " más", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(8) })
+        }
+
+        val pcount = if (kind == 3 && convFiles.size == 1) pdfPageCount(convFiles[0]) else 0
+        var goBtn: Button? = null
+        var baseGo = false
+        val pgNote = txt("", 12f, MUTE)
+        fun pagesOk(): Boolean = kind != 3 || convFiles.size != 1 || convPages.isBlank() || parsePages(convPages, if (pcount > 0) pcount else 100000) != null
+        fun pgCheck() {
+            val ok = pagesOk()
+            if (!ok) {
+                pgNote.text = "Páginas no válidas. Ejemplo: 1-3, 7" + (if (pcount > 0) " (el PDF tiene " + pcount + ")." else ".")
+                pgNote.setTextColor(amber)
+            } else {
+                pgNote.text = if (pcount > 0) "El PDF tiene " + pcount + (if (pcount == 1) " página." else " páginas.") else if (pcount < 0) "No se pudo leer el PDF (quizá está protegido con contraseña)." else ""
+                pgNote.setTextColor(MUTE)
+            }
+            val can = baseGo && ok
+            goBtn?.isEnabled = can
+            goBtn?.alpha = if (can) 1f else 0.4f
         }
 
         if (kind > 0) {
@@ -2126,6 +2270,35 @@ class MainActivity : Activity() {
                     showConverter()
                 }, lp(-1, -2).also { it.topMargin = dp(6) })
             }
+            if (kind == 1 && convTarget == 3 && convFiles.size > 1 && convMerge) {
+                opt.addView(label("Orden de las páginas"))
+                opt.addView(chipGroup(listOf("Como las agregaste", "Por nombre", "Por fecha"), convOrder) {
+                    convOrder = it
+                    showConverter()
+                }, lp(-1, -2).also { it.topMargin = dp(6) })
+            }
+            if (kind == 1 && convTarget < 3) {
+                opt.addView(label("Tamaño"))
+                opt.addView(chipGroup(listOf("Original", "2048 px", "1280 px", "800 px"), convSize) {
+                    convSize = it
+                    showConverter()
+                }, lp(-1, -2).also { it.topMargin = dp(6) })
+                opt.addView(txt(if (convSize == 0) "Conserva la resolución original (o la amplía si eliges HD o ULTRA HD)." else "Reduce el lado mayor a " + listOf(0, 2048, 1280, 800)[convSize] + " px si la imagen es más grande. Nunca la amplía, aunque elijas HD o ULTRA HD.", 12f, MUTE), lp(-1, -2).also { it.topMargin = dp(8) })
+            }
+            if (kind == 3 && convFiles.size == 1) {
+                opt.addView(label("Páginas (opcional)"))
+                opt.addView(field("Todas", false, convPages) {
+                    convPages = it
+                    fillPreview()
+                    pgCheck()
+                }, lp(-1, -2).also { it.topMargin = dp(6) })
+                opt.addView(pgNote, lp(-1, -2).also { it.topMargin = dp(6) })
+                pgCheck()
+            }
+            opt.addView(label("Fecha del archivo nuevo"))
+            opt.addView(chipGroup(listOf("Fecha de hoy", "Conservar la del original"), if (convKeepDate) 1 else 0) {
+                convKeepDate = it == 1
+            }, lp(-1, -2).also { it.topMargin = dp(6) })
             if (opt.childCount > 0) {
                 b.addView(sectionTitle("Opciones"))
                 b.addView(opt)
@@ -2158,23 +2331,34 @@ class MainActivity : Activity() {
             if (kind == 1) {
                 val pv = roundedThumb()
                 b.addView(pv, lp(dp(120), dp(120)))
-                val f0 = convFiles[0]
-                Thread {
-                    val bm = try {
-                        decodeFull(f0, 360)
-                    } catch (e: Throwable) {
-                        null
+                val f0 = convOrdered()[0]
+                val pkey = "cv:" + f0.path + ":" + f0.lastModified()
+                val hit = memCache.get(pkey)
+                if (hit != null) {
+                    pv.setImageBitmap(hit)
+                } else {
+                    convPool.execute {
+                        val bm = try {
+                            decodeFull(f0, 360)
+                        } catch (e: Throwable) {
+                            null
+                        }
+                        if (bm != null) {
+                            memCache.put(pkey, bm)
+                            runOnUiThread { pv.setImageBitmap(bm) }
+                        }
                     }
-                    if (bm != null) runOnUiThread { pv.setImageBitmap(bm) }
-                }.start()
+                }
             }
             b.addView(previewBox)
             fillPreview()
         }
 
         val canWrite = destDir.isDirectory && destDir.canWrite()
-        val canGo = convFiles.isNotEmpty() && !mixed && kind > 0 && canWrite
+        baseGo = convFiles.isNotEmpty() && !mixed && kind > 0 && canWrite
+        val canGo = baseGo && pagesOk()
         val go = primaryButton("Convertir" + (if (convFiles.size > 1) " (" + convFiles.size + ")" else ""))
+        goBtn = go
         go.isEnabled = canGo
         go.alpha = if (canGo) 1f else 0.4f
         go.setOnClickListener { startConversion(destDir) }
@@ -2219,7 +2403,7 @@ class MainActivity : Activity() {
 
     private fun showConvertProgress(jobs: List<ConvJob>) {
         val b = body()
-        val head = txt("Convirtiendo 0 de " + jobs.size, 17f, TXT, true)
+        val head = txt("Convertidos 0 de " + jobs.size, 17f, TXT, true)
         convHead = head
         b.addView(head)
         val overall = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
@@ -2261,27 +2445,42 @@ class MainActivity : Activity() {
         convCancel = false
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         showConvertProgress(jobs)
+        val cores = Runtime.getRuntime().availableProcessors()
         Thread {
             val total = jobs.size
-            for ((i, j) in jobs.withIndex()) {
+            val jobProg = FloatArray(total)
+            val done = java.util.concurrent.atomic.AtomicInteger(0)
+            fun overall(): Float {
+                var s = 0f
+                synchronized(jobProg) {
+                    for (p in jobProg) s += p
+                }
+                return s / total
+            }
+
+            fun runJob(i: Int) {
+                val j = jobs[i]
                 if (convCancel) {
                     j.status = 4
-                    runOnUiThread { updateJobRow(j) }
-                    continue
+                    val dn = done.incrementAndGet()
+                    runOnUiThread {
+                        updateJobRow(j)
+                        convHead?.text = "Convertidos " + dn + " de " + total
+                    }
+                    return
                 }
                 j.status = 1
-                runOnUiThread {
-                    convHead?.text = "Convirtiendo " + (i + 1) + " de " + total
-                    updateJobRow(j)
-                }
+                runOnUiThread { updateJobRow(j) }
                 var last = -1
                 val prog: (Float) -> Unit = { p ->
+                    synchronized(jobProg) { jobProg[i] = p }
                     val q = (p * 100).toInt()
                     if (q != last) {
                         last = q
+                        val ov = overall()
                         runOnUiThread {
                             j.bar?.progress = (p * 1000).toInt()
-                            convOverall?.progress = ((i + p) / total * 1000).toInt()
+                            convOverall?.progress = (ov * 1000).toInt()
                         }
                     }
                 }
@@ -2296,10 +2495,57 @@ class MainActivity : Activity() {
                         j.msg = friendlyError(e)
                     }
                 }
+                synchronized(jobProg) { jobProg[i] = 1f }
+                val dn = done.incrementAndGet()
+                val ov = overall()
                 runOnUiThread {
                     updateJobRow(j)
                     j.bar?.progress = 1000
-                    convOverall?.progress = (i + 1) * 1000 / total
+                    convOverall?.progress = (ov * 1000).toInt()
+                    convHead?.text = "Convertidos " + dn + " de " + total
+                }
+            }
+
+            // varias imágenes a la vez, según los núcleos del teléfono y el tamaño de las fotos
+            var workers = 1
+            if (kind == 1 && total > 1) {
+                var maxPx = 0L
+                for (j in jobs) for (f in j.srcs) {
+                    try {
+                        val dm = imageDims(f)
+                        maxPx = maxOf(maxPx, dm.first.toLong() * dm.second)
+                    } catch (e: Throwable) {
+                    }
+                }
+                workers = if (maxPx <= 12000000L && cores >= 6) 3 else if (maxPx <= 30000000L && cores >= 4) 2 else 1
+                workers = minOf(workers, total)
+            }
+            if (workers <= 1) {
+                for (i in jobs.indices) runJob(i)
+            } else {
+                val pool = java.util.concurrent.Executors.newFixedThreadPool(workers)
+                val latch = java.util.concurrent.CountDownLatch(total)
+                for (i in jobs.indices) {
+                    pool.execute {
+                        try {
+                            runJob(i)
+                        } finally {
+                            latch.countDown()
+                        }
+                    }
+                }
+                latch.await()
+                pool.shutdown()
+                // si faltó memoria yendo en paralelo, se reintentan de a una
+                for (i in jobs.indices) {
+                    val j = jobs[i]
+                    if (j.status == 3 && j.msg.contains("memoria") && !convCancel) {
+                        j.outs.clear()
+                        j.note = ""
+                        j.status = 0
+                        done.decrementAndGet()
+                        runJob(i)
+                    }
                 }
             }
             runOnUiThread {
@@ -2321,6 +2567,14 @@ class MainActivity : Activity() {
         if (bad > 0) parts.add("✕ " + bad + " con error")
         if (cancelled > 0) parts.add(cancelled.toString() + " cancelados")
         b.addView(txt(parts.joinToString("   ·   "), 13f, MUTE, true), lp(-1, -2).also { it.topMargin = dp(6); it.bottomMargin = dp(12) })
+        val okJobs = jobs.filter { it.status == 2 }
+        val inB = okJobs.sumOf { it.inBytes }
+        val outB = okJobs.sumOf { it.outBytes }
+        if (okJobs.isNotEmpty() && inB > 0L && outB > 0L) {
+            val pct = Math.round((outB - inB) * 100.0 / inB).toInt()
+            val diff = if (pct < 0) "−" + (-pct) + " %" else if (pct > 0) "+" + pct + " %" else "sin cambio"
+            b.addView(txt("Peso: " + fmt(inB) + " → " + fmt(outB) + "  (" + diff + ")", 13f, ACC2, true), lp(-1, -2).also { it.bottomMargin = dp(12) })
+        }
         val previewable = setOf("jpg", "jpeg", "png", "webp", "pdf")
         for (j in jobs) {
             val card = cardBox()
@@ -2354,6 +2608,7 @@ class MainActivity : Activity() {
         more.setOnClickListener {
             convFiles.clear()
             convName = ""
+            convPages = ""
             showConverter()
         }
         b.addView(more, lp(-1, dp(48)).also { it.topMargin = dp(8) })
@@ -2404,7 +2659,9 @@ class MainActivity : Activity() {
         var b: Bitmap = res!!
         if (maxDim > 0 && maxOf(b.width, b.height) > maxDim) {
             val k = maxDim.toFloat() / maxOf(b.width, b.height)
-            b = Bitmap.createScaledBitmap(b, maxOf(1, (b.width * k).toInt()), maxOf(1, (b.height * k).toInt()), true)
+            val nb = Bitmap.createScaledBitmap(b, maxOf(1, (b.width * k).toInt()), maxOf(1, (b.height * k).toInt()), true)
+            if (nb !== b) b.recycle()
+            b = nb
         }
         var rot = 0
         try {
@@ -2416,7 +2673,9 @@ class MainActivity : Activity() {
         if (rot != 0) {
             val m = Matrix()
             m.postRotate(rot.toFloat())
-            b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, m, true)
+            val rb = Bitmap.createBitmap(b, 0, 0, b.width, b.height, m, true)
+            if (rb !== b) b.recycle()
+            b = rb
         }
         return b
     }
@@ -2428,9 +2687,14 @@ class MainActivity : Activity() {
     private fun upscale(src: Bitmap, nw: Int, nh: Int): Bitmap {
         var cur = src
         while (cur.width * 2 <= nw && cur.height * 2 <= nh) {
-            cur = Bitmap.createScaledBitmap(cur, cur.width * 2, cur.height * 2, true)
+            val nx = Bitmap.createScaledBitmap(cur, cur.width * 2, cur.height * 2, true)
+            if (cur !== src) cur.recycle()
+            cur = nx
         }
-        return if (cur.width == nw && cur.height == nh) cur else Bitmap.createScaledBitmap(cur, nw, nh, true)
+        if (cur.width == nw && cur.height == nh) return cur
+        val res = Bitmap.createScaledBitmap(cur, nw, nh, true)
+        if (res !== cur && cur !== src) cur.recycle()
+        return res
     }
 
     private fun tierOf(w: Int, h: Int): String {
@@ -2440,17 +2704,23 @@ class MainActivity : Activity() {
         else "menor que HD (lado mayor de " + big + " px)"
     }
 
-    private fun convertImage(f: File, fmtIdx: Int, level: Int, bg: Int, out: File): String {
-        val orig = decodeFull(f, 0)
-        val ow = orig.width
-        val oh = orig.height
-        var bm = orig
-        val minLong = intArrayOf(0, 1920, 3840)[level]
-        val big = maxOf(ow, oh)
+    private fun convertImage(f: File, fmtIdx: Int, level: Int, bg: Int, cap: Int, out: File): String {
+        val dims = imageDims(f)
+        val ow = dims.first
+        val oh = dims.second
+        // con tamaño fijo la foto se lee ya reducida: menos memoria y más rapidez
+        var bm = decodeFull(f, cap)
+        val decW = bm.width
+        val decH = bm.height
+        val reduced = cap > 0 && maxOf(ow, oh) > cap
+        val minLong = if (cap > 0) 0 else intArrayOf(0, 1920, 3840)[level]
+        val big = maxOf(decW, decH)
         var upscaled = false
         if (minLong > 0 && big < minLong) {
             val k = minLong.toFloat() / big
-            bm = upscale(orig, maxOf(1, Math.round(ow * k)), maxOf(1, Math.round(oh * k)))
+            val up = upscale(bm, maxOf(1, Math.round(decW * k)), maxOf(1, Math.round(decH * k)))
+            if (up !== bm) bm.recycle()
+            bm = up
             upscaled = true
         }
         if (fmtIdx == 0 && bm.hasAlpha()) {
@@ -2458,24 +2728,31 @@ class MainActivity : Activity() {
             val cv = Canvas(flat)
             cv.drawColor(bg)
             cv.drawBitmap(bm, 0f, 0f, null)
+            bm.recycle()
             bm = flat
         }
         val lossless = fmtIdx == 2 && level == 2 && Build.VERSION.SDK_INT >= 30
         val q = if (fmtIdx == 0) intArrayOf(85, 92, 98)[level] else intArrayOf(80, 90, 100)[level]
         val cf = if (fmtIdx == 0) Bitmap.CompressFormat.JPEG else if (fmtIdx == 1) Bitmap.CompressFormat.PNG else webpFormat(lossless)
         val finalBm = bm
-        FileOutputStream(out).use { os ->
-            if (!finalBm.compress(cf, q, os)) throw Exception("el sistema no pudo codificar la imagen")
+        try {
+            java.io.BufferedOutputStream(FileOutputStream(out), 65536).use { os ->
+                if (!finalBm.compress(cf, q, os)) throw Exception("el sistema no pudo codificar la imagen")
+            }
+            var note = finalBm.width.toString() + "×" + finalBm.height + " px"
+            if (reduced) note += " (reducida desde " + ow + "×" + oh + " px)"
+            if (upscaled) note += " (ampliada desde " + decW + "×" + decH + " por interpolación, sin añadir detalle real)"
+            note += " · " + tierOf(finalBm.width, finalBm.height)
+            note += if (fmtIdx == 1) " · PNG sin pérdida" else if (lossless) " · WebP sin pérdida" else " · calidad " + q + " %"
+            return note
+        } finally {
+            finalBm.recycle()
         }
-        var note = bm.width.toString() + "×" + bm.height + " px"
-        if (upscaled) note += " (ampliada desde " + ow + "×" + oh + " por interpolación, sin añadir detalle real)"
-        note += " · " + tierOf(bm.width, bm.height)
-        note += if (fmtIdx == 1) " · PNG sin pérdida" else if (lossless) " · WebP sin pérdida" else " · calidad " + q + " %"
-        return note
     }
 
     private fun imagesToPdf(srcs: List<File>, out: File, maxDim: Int, onProg: (Float) -> Unit) {
         val doc = PdfDocument()
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
         try {
             for ((i, f) in srcs.withIndex()) {
                 if (convCancel) throw Exception("cancelado")
@@ -2489,24 +2766,27 @@ class MainActivity : Activity() {
                 val page = doc.startPage(PdfDocument.PageInfo.Builder(pw, ph, i + 1).create())
                 val cv = page.canvas
                 cv.drawColor(Color.WHITE)
-                cv.drawBitmap(bm, null, android.graphics.Rect(0, 0, pw, ph), Paint(Paint.FILTER_BITMAP_FLAG))
+                cv.drawBitmap(bm, null, android.graphics.Rect(0, 0, pw, ph), paint)
                 doc.finishPage(page)
+                bm.recycle()
                 onProg((i + 1f) / srcs.size)
             }
-            FileOutputStream(out).use { os -> doc.writeTo(os) }
+            java.io.BufferedOutputStream(FileOutputStream(out), 65536).use { os -> doc.writeTo(os) }
         } finally {
             doc.close()
         }
     }
 
-    private fun pdfToImages(f: File, dest: File, base: String, fmtIdx: Int, dpi: Int, quality: Int, outs: MutableList<File>, onProg: (Float) -> Unit): String {
+    private fun pdfToImages(f: File, dest: File, base: String, fmtIdx: Int, dpi: Int, quality: Int, pages: List<Int>?, outs: MutableList<File>, onProg: (Float) -> Unit): String {
         var note = ""
         val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
         try {
             val rr = PdfRenderer(pfd)
             try {
                 val n = rr.pageCount
-                for (i in 0 until n) {
+                val idxs = if (pages == null) (0 until n).toList() else pages.filter { it < n }
+                if (idxs.isEmpty()) throw Exception("el PDF no tiene las páginas indicadas (tiene " + n + ")")
+                for ((k, i) in idxs.withIndex()) {
                     if (convCancel) throw Exception("cancelado")
                     val pg = rr.openPage(i)
                     val sc = dpi / 72f
@@ -2520,9 +2800,10 @@ class MainActivity : Activity() {
                         h = maxOf(1, (h * k).toInt())
                         limited = true
                     }
-                    if (i == 0) {
+                    if (k == 0) {
                         note = dpi.toString() + " ppp · " + w + "×" + h + " px por página" + (if (limited) " (limitado a 4000 px de lado mayor)" else "") +
-                            (if (fmtIdx == 1) " · JPG calidad " + quality + " %" else " · PNG sin pérdida")
+                            (if (fmtIdx == 1) " · JPG calidad " + quality + " %" else " · PNG sin pérdida") +
+                            (if (pages != null) " · " + idxs.size + " de " + n + " páginas" else "")
                     }
                     val bm = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                     bm.eraseColor(Color.WHITE)
@@ -2538,7 +2819,7 @@ class MainActivity : Activity() {
                         if (tmp.exists()) tmp.delete()
                         bm.recycle()
                     }
-                    onProg((i + 1f) / n)
+                    onProg((k + 1f) / idxs.size)
                 }
             } finally {
                 rr.close()
@@ -2564,8 +2845,8 @@ class MainActivity : Activity() {
                     j.note = "Páginas con imágenes de hasta " + dim + " px de lado mayor (nunca se amplían)"
                 } else {
                     val f = j.srcs[0]
-                    if (convTarget == 1 && f.extension.lowercase() == "png" && convLevel == 0) throw Exception("ya está en PNG")
-                    j.note = convertImage(f, convTarget, convLevel, convBg, tmp)
+                    if (convTarget == 1 && f.extension.lowercase() == "png" && convLevel == 0 && convSize == 0) throw Exception("ya está en PNG")
+                    j.note = convertImage(f, convTarget, convLevel, convBg, intArrayOf(0, 2048, 1280, 800)[convSize], tmp)
                     onProg(1f)
                     j.outs.add(finalizeFile(tmp, dest, j.outBase, ext))
                 }
@@ -2577,7 +2858,14 @@ class MainActivity : Activity() {
                 j.outs.add(finalizeFile(tmp, dest, j.outBase, ext))
                 j.note = if (convTarget == 0) "AAC a " + kbps + " kbps" else "WAV sin pérdida (PCM de 16 bits)"
             } else {
-                j.note = pdfToImages(j.srcs[0], dest, j.outBase, convTarget, intArrayOf(150, 200, 300)[convLevel], intArrayOf(85, 92, 98)[convLevel], j.outs, onProg)
+                val pages = if (convFiles.size == 1 && !convPages.isBlank()) parsePages(convPages, 100000) else null
+                j.note = pdfToImages(j.srcs[0], dest, j.outBase, convTarget, intArrayOf(150, 200, 300)[convLevel], intArrayOf(85, 92, 98)[convLevel], pages, j.outs, onProg)
+            }
+            j.inBytes = j.srcs.sumOf { it.length() }
+            j.outBytes = j.outs.sumOf { it.length() }
+            if (convKeepDate) {
+                val stamp = j.srcs.maxOf { it.lastModified() }
+                if (stamp > 0L) for (o in j.outs) o.setLastModified(stamp)
             }
         } finally {
             if (tmp.exists()) tmp.delete()
@@ -6519,6 +6807,8 @@ private class ConvJob(val label: String, val srcs: List<File>, val outBase: Stri
     var msg = ""
     var note = ""
     val outs = ArrayList<File>()
+    var inBytes = 0L
+    var outBytes = 0L
     var statusView: TextView? = null
     var bar: ProgressBar? = null
 }
