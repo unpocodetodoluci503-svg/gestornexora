@@ -311,7 +311,28 @@ class MainActivity : Activity() {
                 Seccion("Mejoras visuales", listOf(
                     "Grietas de la luna más realistas: fisuras de roca irregulares y finas en la punta, con ramificaciones y luz que sale desde dentro; al romperse saltan esquirlas de roca")),
                 Seccion("Mejoras", listOf(
-                    "El crujido de las grietas suena más a roca: chasquido seco, golpe sordo, resonancia de piedra y gravilla que cae"))))
+                    "El crujido de las grietas suena más a roca: chasquido seco, golpe sordo, resonancia de piedra y gravilla que cae")))),
+        Entrada("0.6.3", null, "La luna, una vez al día",
+            "La luna ya no se rompe sin parar: pasa una sola vez por día y los murciélagos y las nubes cruzan por delante de ella.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "La luna se agrieta, estalla y renace una sola vez por día; después se queda entera hasta las 00:00, cuando vuelve a poder pasar")),
+                Seccion("Mejoras visuales", listOf(
+                    "Los murciélagos y las nubes ahora pasan por delante de la luna y no por detrás, porque la luna está lejos y es enorme")))),
+        Entrada("0.6.4", null, "La luna no vuelve hasta mañana",
+            "Cuando la luna estalla, desaparece de verdad y no regresa hasta el día siguiente.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "La luna destruida ya no renace en el momento: desaparece del cielo y reaparece entera al día siguiente, a partir de las 00:00")),
+                Seccion("Correcciones", listOf(
+                    "Si cierras la app después de que la luna estalle, no vuelve a aparecer ese mismo día")))),
+        Entrada("0.6.5", null, "RAR 5 ya se puede abrir",
+            "Nexora ahora extrae también los RAR de versión 5, que son los que crean hoy WinRAR y la mayoría de las apps.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Extracción de archivos RAR 5, con vista del contenido, contraseña y las mismas opciones que los demás formatos")),
+                Seccion("Mejoras", listOf(
+                    "Nexora incluye ahora el motor de 7-Zip para leer RAR 5, por eso la app pesa más"))))
     )
 
     private val pendientes = listOf(
@@ -325,7 +346,7 @@ class MainActivity : Activity() {
         "PDF a Word y otros documentos: no se puede conservar el formato con las herramientas actuales.",
         "Mejorar imágenes: una imagen a la vez; entrada de hasta 1 MP en 4× y 2 MP en 2× (las fotos más grandes se reducen antes de mejorarlas); se procesa en el procesador del teléfono, sin GPU.",
         "Vista en cuadrícula: aún no existe.",
-        "RAR 5 e ISO: no se pueden extraer sin una biblioteca adicional.",
+        "ISO: no se puede extraer sin una biblioteca adicional.",
         "Paquetes divididos (XAPK, APKS): se pueden extraer, pero no instalar desde Nexora.",
         "Comprimir: por ahora solo se crea ZIP; 7z y TAR quedan para más adelante.",
         "Limpiar: los resultados se guardan solo mientras la app está abierta y se vuelven a calcular al actualizar.",
@@ -5236,7 +5257,6 @@ class MainActivity : Activity() {
         return if (l.contains("enospc") || l.contains("no space left")) "No hay espacio suficiente en el destino."
         else if (l.contains("eacces") || l.contains("permission denied") || l.contains("read-only")) "Android no permite escribir en esa carpeta."
         else if (l.contains("password")) "La contraseña es incorrecta o falta."
-        else if (fmt == "rar" && l.contains("v5")) "Este RAR usa la versión 5, que Nexora todavía no puede abrir."
         else if (l.contains("unsupported") || l.contains("not supported")) "Este archivo usa un método de compresión que Nexora no admite."
         else "El archivo está dañado, incompleto o no es del formato indicado. (" + (e.message ?: e.javaClass.simpleName) + ")"
     }
@@ -5251,6 +5271,91 @@ class MainActivity : Activity() {
             n++
         }
         return m.lowercase()
+    }
+
+    // ---------- RAR 5 (motor 7-Zip) ----------
+    private class Rar5Arc(val raf: java.io.RandomAccessFile, val ar: net.sf.sevenzipjbinding.IInArchive) : java.io.Closeable {
+        override fun close() {
+            try {
+                ar.close()
+            } catch (e: Throwable) {
+            }
+            try {
+                raf.close()
+            } catch (e: Throwable) {
+            }
+        }
+    }
+
+    private class Rar5CB(val pwd: String?, val out: java.io.OutputStream) : net.sf.sevenzipjbinding.IArchiveExtractCallback, net.sf.sevenzipjbinding.ICryptoGetTextPassword {
+        var err: Throwable? = null
+        var result: net.sf.sevenzipjbinding.ExtractOperationResult? = null
+
+        override fun getStream(index: Int, mode: net.sf.sevenzipjbinding.ExtractAskMode?): net.sf.sevenzipjbinding.ISequentialOutStream? {
+            if (mode != net.sf.sevenzipjbinding.ExtractAskMode.EXTRACT) return null
+            return net.sf.sevenzipjbinding.ISequentialOutStream { data ->
+                try {
+                    out.write(data, 0, data.size)
+                } catch (t: Throwable) {
+                    err = t
+                    throw net.sf.sevenzipjbinding.SevenZipException("No se pudo escribir")
+                }
+                data.size
+            }
+        }
+
+        override fun prepareOperation(mode: net.sf.sevenzipjbinding.ExtractAskMode?) {}
+        override fun setOperationResult(r: net.sf.sevenzipjbinding.ExtractOperationResult?) {
+            result = r
+        }
+
+        override fun setTotal(total: Long) {}
+        override fun setCompleted(done: Long) {}
+        override fun cryptoGetTextPassword(): String = pwd ?: ""
+    }
+
+    private fun isRar5(f: File): Boolean {
+        return try {
+            val sig = ByteArray(8)
+            val n = FileInputStream(f).use { it.read(sig) }
+            n == 8 && sig[0] == 0x52.toByte() && sig[1] == 0x61.toByte() && sig[2] == 0x72.toByte() && sig[3] == 0x21.toByte() &&
+                sig[4] == 0x1A.toByte() && sig[5] == 0x07.toByte() && sig[6] == 0x01.toByte() && sig[7] == 0x00.toByte()
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun rar5Open(f: File, pwd: String?): Rar5Arc {
+        val raf = java.io.RandomAccessFile(f, "r")
+        try {
+            val st = net.sf.sevenzipjbinding.impl.RandomAccessFileInStream(raf)
+            val ar = if (pwd != null) net.sf.sevenzipjbinding.SevenZip.openInArchive(null, st, pwd) else net.sf.sevenzipjbinding.SevenZip.openInArchive(null, st)
+            return Rar5Arc(raf, ar)
+        } catch (e: Throwable) {
+            try {
+                raf.close()
+            } catch (e2: Exception) {
+            }
+            throw e
+        }
+    }
+
+    private fun rar5Extract(ar: net.sf.sevenzipjbinding.IInArchive, index: Int, pwd: String?, o: java.io.OutputStream) {
+        val cb = Rar5CB(pwd, o)
+        try {
+            ar.extract(intArrayOf(index), false, cb)
+        } catch (e: Throwable) {
+            val inner = cb.err
+            if (inner != null) throw inner
+            throw e
+        }
+        val inner = cb.err
+        if (inner != null) throw inner
+        val r = cb.result
+        if (r != null && r != net.sf.sevenzipjbinding.ExtractOperationResult.OK) {
+            if (r.name.contains("PASSWORD")) throw NeedPwd()
+            throw Exception("Error al extraer (" + r.name + ")")
+        }
     }
 
     private fun arcList(f: File, fmt: String, pwd: String?, stop: () -> Boolean): List<ArcEntry> {
@@ -5271,11 +5376,25 @@ class MainActivity : Activity() {
             }
         } else if (fmt == "rar") {
             try {
-                val a = if (pwd != null) com.github.junrar.Archive(f, pwd) else com.github.junrar.Archive(f)
-                a.use { ar ->
-                    val hs = ar.fileHeaders
-                    if (pwd == null && hs.any { it.isEncrypted }) throw NeedPwd()
-                    for ((i, h) in hs.withIndex()) out.add(ArcEntry((h.fileName ?: "").replace('\\', '/'), h.isDirectory, h.fullUnpackSize, i))
+                if (isRar5(f)) {
+                    rar5Open(f, pwd).use { a ->
+                        var enc = false
+                        for (i in 0 until a.ar.numberOfItems) {
+                            val path = (a.ar.getProperty(i, net.sf.sevenzipjbinding.PropID.PATH) as? String) ?: ""
+                            val isDir = (a.ar.getProperty(i, net.sf.sevenzipjbinding.PropID.IS_FOLDER) as? Boolean) ?: false
+                            val size = (a.ar.getProperty(i, net.sf.sevenzipjbinding.PropID.SIZE) as? Long) ?: -1L
+                            if ((a.ar.getProperty(i, net.sf.sevenzipjbinding.PropID.ENCRYPTED) as? Boolean) == true) enc = true
+                            out.add(ArcEntry(path.replace('\\', '/'), isDir, size, i))
+                        }
+                        if (enc && pwd == null) throw NeedPwd()
+                    }
+                } else {
+                    val a = if (pwd != null) com.github.junrar.Archive(f, pwd) else com.github.junrar.Archive(f)
+                    a.use { ar ->
+                        val hs = ar.fileHeaders
+                        if (pwd == null && hs.any { it.isEncrypted }) throw NeedPwd()
+                        for ((i, h) in hs.withIndex()) out.add(ArcEntry((h.fileName ?: "").replace('\\', '/'), h.isDirectory, h.fullUnpackSize, i))
+                    }
                 }
             } catch (e: NeedPwd) {
                 throw e
@@ -5412,16 +5531,32 @@ class MainActivity : Activity() {
                     }
                 }
             } else if (fmt == "rar") {
-                val a = if (pwd != null) com.github.junrar.Archive(f, pwd) else com.github.junrar.Archive(f)
-                a.use { ar ->
-                    for ((i, h) in ar.fileHeaders.withIndex()) {
-                        if (!sel.contains(i)) continue
-                        if (arcCancel) throw ArcCancel()
-                        curName = (h.fileName ?: "").replace('\\', '/')
-                        if (h.isDirectory) {
-                            handle(curName, true) { }
-                        } else {
-                            handle(curName, false) { o -> ar.extractFile(h, o) }
+                if (isRar5(f)) {
+                    rar5Open(f, pwd).use { a ->
+                        for (i in 0 until a.ar.numberOfItems) {
+                            if (!sel.contains(i)) continue
+                            if (arcCancel) throw ArcCancel()
+                            curName = ((a.ar.getProperty(i, net.sf.sevenzipjbinding.PropID.PATH) as? String) ?: "").replace('\\', '/')
+                            val isDir = (a.ar.getProperty(i, net.sf.sevenzipjbinding.PropID.IS_FOLDER) as? Boolean) ?: false
+                            if (isDir) {
+                                handle(curName, true) { }
+                            } else {
+                                handle(curName, false) { o -> rar5Extract(a.ar, i, pwd, o) }
+                            }
+                        }
+                    }
+                } else {
+                    val a = if (pwd != null) com.github.junrar.Archive(f, pwd) else com.github.junrar.Archive(f)
+                    a.use { ar ->
+                        for ((i, h) in ar.fileHeaders.withIndex()) {
+                            if (!sel.contains(i)) continue
+                            if (arcCancel) throw ArcCancel()
+                            curName = (h.fileName ?: "").replace('\\', '/')
+                            if (h.isDirectory) {
+                                handle(curName, true) { }
+                            } else {
+                                handle(curName, false) { o -> ar.extractFile(h, o) }
+                            }
                         }
                     }
                 }

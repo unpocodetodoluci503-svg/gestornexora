@@ -221,6 +221,17 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private var lastNs = 0L
     private var minStepNs = 33000000L
     var t = 0f
+
+    // evento de la luna: una sola vez por día; se reinicia a las 00:00
+    private var evActive = false
+    private var evStart = 0f
+    private var evClock = 0f
+    private var evDay = 0
+    private var moonDay = 0
+    private var dayChkT = 99f
+    private var moonHidden = false   // la luna destruida no vuelve hasta el día siguiente
+    private var evMarked = false
+    private val batV = FloatArray(4)
     private var W = 0f
     private var H = 0f
     private var botInset = 0f
@@ -419,10 +430,54 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             muted = ctx.getSharedPreferences("nexora", Context.MODE_PRIVATE).getBoolean("hwMute", false)
         } catch (e: Exception) {
         }
+        try {
+            moonDay = ctx.getSharedPreferences("nexora", Context.MODE_PRIVATE).getInt("hwMoonDay", 0)
+        } catch (e: Exception) {
+        }
         for (l in lurks) l.wait = rf(0.5f, 4f)
     }
 
-    private fun rf(a: Float, b: Float): Float = a + (b - a) * rnd.nextFloat()
+    private fun todayKey(): Int {
+        val c = java.util.Calendar.getInstance()
+        return c.get(java.util.Calendar.YEAR) * 10000 + (c.get(java.util.Calendar.MONTH) + 1) * 100 + c.get(java.util.Calendar.DAY_OF_MONTH)
+    }
+
+    // La luna se rompe una sola vez al día. Al terminar queda entera hasta que cambie el día (00:00).
+    private fun updateEvent(dt: Float) {
+        if (!evActive) {
+            evClock = 0f
+            dayChkT += dt
+            if (dayChkT >= 3f) {
+                dayChkT = 0f
+                val day = todayKey()
+                if (day != moonDay) {
+                    evActive = true
+                    evMarked = false
+                    evStart = t
+                    evDay = day
+                    moonHidden = false
+                } else {
+                    moonHidden = true
+                }
+            }
+        } else {
+            evClock = t - evStart
+            // en cuanto la luna estalla se anota el día: si cierras la app, no vuelve hasta mañana
+            if (!evMarked && evClock >= BLAST_T) {
+                evMarked = true
+                moonDay = evDay
+                try {
+                    context.getSharedPreferences("nexora", Context.MODE_PRIVATE).edit().putInt("hwMoonDay", moonDay).apply()
+                } catch (e: Exception) {
+                }
+            }
+            if (evClock >= CYC) {
+                evActive = false
+                evClock = 0f
+                moonHidden = true
+            }
+        }
+    }
 
     // ---------------------------------------------------------------- ciclo
     fun setActive(on: Boolean) {
@@ -431,7 +486,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             readEnv()
             readInsets()
             ensureSound()
-            prevCt = t % CYC
+            prevCt = evClock
             rumbleOn = false
             schedule()
         } else {
@@ -647,6 +702,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     // ------------------------------------------------------------ simulación
     private fun step(dt: Float) {
         if (W <= 0f) return
+        updateEvent(dt)
         for (i in 0 until nEmb) {
             ey[i] -= evy[i] * dt
             ex[i] += sin(t * 1.4f + eph[i]) * 14f * d * dt
@@ -1083,6 +1139,52 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         c.restore()
     }
 
+    private fun drawCloud(c: Canvas, k: Int, w: Float, h: Float, ox: Float, oy: Float) {
+        val span = w + 260f * d
+        val cx = ((t * (6f + k * 4f) * d + k * w * 0.6f) % span) - 130f * d + ox
+        val cy = h * (0.13f + 0.09f * k) + oy
+        pFill.shader = null
+        pFill.color = hc(0x8A1A0F2E)
+        rect.set(cx - 70f * d, cy - 10f * d, cx + 70f * d, cy + 12f * d)
+        c.drawOval(rect, pFill)
+        rect.set(cx - 40f * d, cy - 20f * d, cx + 30f * d, cy + 6f * d)
+        c.drawOval(rect, pFill)
+        rect.set(cx - 10f * d, cy - 14f * d, cx + 60f * d, cy + 10f * d)
+        c.drawOval(rect, pFill)
+    }
+
+    private fun batPos(i: Int, w: Float, h: Float) {
+        val sp = (28f + 22f * hwHash(i, 11)) * d
+        val span = w + 160f * d
+        var bx = (t * sp + hwHash(i, 12) * span) % span
+        if (i % 2 == 1) bx = span - bx
+        bx -= 80f * d
+        batV[0] = bx
+        batV[1] = h * (0.07f + 0.4f * hwHash(i, 13)) + sin(t * 1.6f + i * 1.7f) * 16f * d
+        batV[2] = (7f + 7f * hwHash(i, 14)) * d
+        batV[3] = sin(t * (11f + i) + i)
+    }
+
+    // La luna está lejos y es enorme: nubes y murciélagos pasan por delante de ella, no por detrás.
+    // Se vuelven a dibujar encima de la luna, solo en la zona de la luna y su resplandor.
+    private fun drawInFrontOfMoon(c: Canvas) {
+        if (W <= 0f || !moonInit || bgW <= 0f) return
+        val ct = evClock
+        val e = if (ct >= BLAST_T) ct - BLAST_T else -1f
+        if (moonHidden || e >= 0f) return
+        val rad = 34f * d * 2.4f
+        c.save()
+        clipP.reset()
+        clipP.addCircle(moonX, moonY, rad, Path.Direction.CW)
+        c.clipPath(clipP)
+        for (k in 0..1) drawCloud(c, k, bgW, bgH, bgOffX, bgOffY)
+        for (i in 0..4) {
+            batPos(i, bgW, bgH)
+            drawBat(c, batV[0] + bgOffX, batV[1] + bgOffY, batV[2], batV[3])
+        }
+        c.restore()
+    }
+
     fun drawBackground(c: Canvas, w: Float, h: Float) {
         if (w <= 0f || h <= 0f) return
         if (w != bgW || h != bgH) buildBg(w, h)
@@ -1091,7 +1193,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         pBg.alpha = 255
         c.drawRect(0f, 0f, w, h, pBg)
         pBg.shader = null
-        val ct = t % CYC
+        val ct = evClock
         val eBlast = if (ct >= BLAST_T) ct - BLAST_T else -1f
         c.save()
         if (eBlast >= 0f && eBlast < 0.8f) {
@@ -1107,28 +1209,11 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             c.drawCircle(hwHash(i, 1) * w, hwHash(i, 2) * h * 0.6f, (0.6f + 1f * hwHash(i, 4)) * d, pFill)
         }
         // nubes oscuras
-        for (k in 0..1) {
-            val span = w + 260f * d
-            val cx = ((t * (6f + k * 4f) * d + k * w * 0.6f) % span) - 130f * d
-            val cy = h * (0.13f + 0.09f * k)
-            pFill.color = hc(0x8A1A0F2E)
-            rect.set(cx - 70f * d, cy - 10f * d, cx + 70f * d, cy + 12f * d)
-            c.drawOval(rect, pFill)
-            rect.set(cx - 40f * d, cy - 20f * d, cx + 30f * d, cy + 6f * d)
-            c.drawOval(rect, pFill)
-            rect.set(cx - 10f * d, cy - 14f * d, cx + 60f * d, cy + 10f * d)
-            c.drawOval(rect, pFill)
-        }
+        for (k in 0..1) drawCloud(c, k, w, h, 0f, 0f)
         // murciélagos
         for (i in 0..4) {
-            val sp = (28f + 22f * hwHash(i, 11)) * d
-            val span = w + 160f * d
-            var bx = (t * sp + hwHash(i, 12) * span) % span
-            if (i % 2 == 1) bx = span - bx
-            bx -= 80f * d
-            val by = h * (0.07f + 0.4f * hwHash(i, 13)) + sin(t * 1.6f + i * 1.7f) * 16f * d
-            val s = (7f + 7f * hwHash(i, 14)) * d
-            drawBat(c, bx, by, s, sin(t * (11f + i) + i))
+            batPos(i, w, h)
+            drawBat(c, batV[0], batV[1], batV[2], batV[3])
         }
         // relámpago
         if (boltAge < 0.5f) {
@@ -1370,7 +1455,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     // elige un hueco sin botones para la luna (solo cuando no se esta rompiendo)
     private fun updateMoon(dt: Float) {
         if (W <= 0f) return
-        val ct = t % CYC
+        val ct = evClock
         val hh = if (bgH > 0f) bgH else H
         val mr = 34f * d
         if (!moonInit) {
@@ -1410,13 +1495,13 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
 
     private fun drawMoon(c: Canvas) {
         if (W <= 0f || !moonInit) return
-        val ct = t % CYC
+        val ct = evClock
         val mr = 34f * d
         val crackP = if (ct < CRACK_T0) 0f else if (ct < CRACK_T1) (ct - CRACK_T0) / (CRACK_T1 - CRACK_T0) else 1f
         val charge = if (ct >= CRACK_T1 && ct < BLAST_T) (ct - CRACK_T1) / (BLAST_T - CRACK_T1) else 0f
         val e = if (ct >= BLAST_T) ct - BLAST_T else -1f
         val reb = if (e >= REB_T) ((e - REB_T) / 3.9f).coerceIn(0f, 1f) else 0f
-        if (e >= 0f && reb <= 0f) return
+        if (moonHidden || e >= 0f) return
         val intensity = crackP * crackP
         val pulse = sin(t * (0.9f + 6f * crackP + 8f * charge))
         // vibraciones: constante, mas un tiron con cada ruptura
@@ -1607,7 +1692,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
 
     private fun drawBlast(c: Canvas) {
         if (W <= 0f || !moonInit) return
-        val ct = t % CYC
+        val ct = evClock
         if (ct < BLAST_T) return
         val e = ct - BLAST_T
         val mx = moonX
@@ -1630,8 +1715,8 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             c.restore()
         }
         // nucleo que queda latiendo hasta que la luna renace
-        if (e < REB_T) {
-            val ac = max(0.12f, 1f - e / 6.5f) * 0.55f
+        if (e < 6.5f) {
+            val ac = (1f - e / 6.5f) * 0.55f
             val cr = mr * (0.4f + 0.2f * sin(t * 3f))
             c.save()
             c.translate(mx, my)
@@ -1743,33 +1828,11 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 c.drawLine(mx + cos(a) * trav2, my + sin(a) * trav2 + 30f * d * tt * tt, mx + cos(a) * trav, my + sin(a) * trav + 30f * d * e * e, pStroke)
             }
         }
-        // renacimiento: la energia vuelve a juntarse en la luna
-        if (e >= REB_T) {
-            val reb = ((e - REB_T) / 3.9f).coerceIn(0f, 1f)
-            pFill.shader = null
-            for (i in 0 until 28) {
-                val a = hwHash(i, 120) * TAU
-                val r0 = mr * (3f + 5f * hwHash(i, 121))
-                val q = hwEase(min(1f, max(0f, reb * 1.3f - hwHash(i, 122) * 0.3f)))
-                val dist = r0 * (1f - q)
-                pFill.color = hc(0xFFE9D6FF)
-                pFill.alpha = (q * (1f - q) * 4f * 255f).toInt().coerceIn(0, 255)
-                c.drawCircle(mx + cos(a) * dist, my + sin(a) * dist, 2.2f * d, pFill)
-            }
-            if (reb > 0.85f) {
-                val u = (reb - 0.85f) / 0.15f
-                pStroke.shader = null
-                pStroke.color = hc(0xFFFFE2A8)
-                pStroke.alpha = ((1f - u) * 200f).toInt().coerceIn(0, 255)
-                pStroke.strokeWidth = 3f * d
-                c.drawCircle(mx, my, mr * (1f + u * 2.5f), pStroke)
-            }
-        }
     }
 
     // destello y onda que cruzan toda la pantalla (sin tapar nada)
     private fun drawBlastOverlay(c: Canvas) {
-        val ct = t % CYC
+        val ct = evClock
         if (ct < BLAST_T) return
         val e = ct - BLAST_T
         if (e < 0.6f) {
@@ -1901,7 +1964,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     }
 
     private fun stepCreature(dt: Float) {
-        val ct = t % CYC
+        val ct = evClock
         val e = if (ct >= BLAST_T) ct - BLAST_T else -1f
         val tau = e - CRE_T0
         if (e < 0f || tau > 8.1f) {
@@ -2273,7 +2336,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     // ------------------------------------------------------------ sonido sincronizado
     private fun stepSound(dt: Float) {
         val snd = sound ?: return
-        val ct = t % CYC
+        val ct = evClock
         if (ct < prevCt) prevCt = -0.001f
         val a = prevCt
         if (muted) rumbleOn = false
@@ -2333,6 +2396,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         drawSmoke(c)
         drawMoon(c)
         drawBlast(c)
+        drawInFrontOfMoon(c)
         for (k in 0..1) {
             drawSkullBody(c, skullX(k), skullY(k) + sin(t * 1.3f + k * 2f) * 1.5f * d, skullS(), if (k == 0) 14f else -14f, k * 1.9f, k, skullJaw(k * 1.9f))
         }

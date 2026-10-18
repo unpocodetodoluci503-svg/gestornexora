@@ -11,8 +11,8 @@ android {
         applicationId = "com.gestor.archivos"
         minSdk = 26
         targetSdk = 34
-        versionCode = 602
-        versionName = "0.6.2"
+        versionCode = 605
+        versionName = "0.6.5"
         ndk {
             abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
         }
@@ -45,6 +45,7 @@ dependencies {
     implementation("org.tukaani:xz:1.10")
     implementation("net.lingala.zip4j:zip4j:2.11.5")
     implementation("com.github.junrar:junrar:7.5.5")
+    implementation("com.github.omicronapps:7-Zip-JBinding-4Android:Release-16.02-2.02")
 }
 
 // Efectos de Halloween: copia HalloweenFx.kt junto al resto del código antes de compilar
