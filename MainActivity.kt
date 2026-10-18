@@ -299,7 +299,19 @@ class MainActivity : Activity() {
                     "Instalar APK con el instalador oficial de Android; si falta el permiso, Nexora te lleva a la configuración")),
                 Seccion("Correcciones", listOf(
                     "El orden elegido ahora tiene una copia de seguridad que se recupera si los datos de la app se borran",
-                    "Los paquetes XAPK, APKS y APKM ya no se tratan como APK individuales"))))
+                    "Los paquetes XAPK, APKS y APKM ya no se tratan como APK individuales")))),
+        Entrada("0.6.2", null, "Halloween en Nexora",
+            "Un fondo nocturno animado con luna, criaturas y sonidos de Halloween, y una luna cuyas grietas se ven y suenan como roca de verdad.",
+            listOf(
+                Seccion("Novedades", listOf(
+                    "Fondo de Halloween: cielo nocturno con luna, estrellas, murciélagos, nubes, niebla, cementerio, árboles secos y relámpagos",
+                    "Calaveras con fuego, calavera voladora, calabazas que se asoman y ojos que brillan en la oscuridad",
+                    "Sangre que gotea de las tarjetas, brasas y telarañas en las esquinas",
+                    "La luna se agrieta, estalla y de ella sale una criatura que se ríe, con sonidos propios y un botón para silenciarlos")),
+                Seccion("Mejoras visuales", listOf(
+                    "Grietas de la luna más realistas: fisuras de roca irregulares y finas en la punta, con ramificaciones y luz que sale desde dentro; al romperse saltan esquirlas de roca")),
+                Seccion("Mejoras", listOf(
+                    "El crujido de las grietas suena más a roca: chasquido seco, golpe sordo, resonancia de piedra y gravilla que cae"))))
     )
 
     private val pendientes = listOf(

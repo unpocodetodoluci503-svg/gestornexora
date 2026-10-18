@@ -64,6 +64,13 @@ private const val PI_F = 3.1415927f
 private val LAUGH_ON = floatArrayOf(0f, 0.34f, 0.68f, 1.02f, 1.36f)
 private val LAUGH_DUR = floatArrayOf(0.24f, 0.24f, 0.24f, 0.27f, 0.95f)
 
+// Geometría de las grietas de la luna
+private const val CK = 14        // puntos de cada grieta principal (del centro al borde)
+private const val CR = 6         // punto donde la grieta cruza el anillo interior (radio 0.45)
+private const val RPN = 9        // puntos de cada fractura del anillo
+private const val BR_COUNT = 16  // ramificaciones finas
+private const val BR_PTS = 6     // puntos de cada ramificación
+
 private fun hwLerp(a: Int, b: Int, t: Float): Int {
     val k = t.coerceIn(0f, 1f)
     val aa = ((a ushr 24) and 255) + (((b ushr 24) and 255) - ((a ushr 24) and 255)) * k
@@ -318,17 +325,20 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private var btnN = 0
 
     // luna rota: geometría de las grietas y de los trozos
-    private val bnd = FloatArray(8 * 7 * 2)
-    private val ringP = FloatArray(8 * 5 * 2)
+    private val bnd = FloatArray(8 * CK * 2)
+    private val ringP = FloatArray(8 * RPN * 2)
     private val arcP = FloatArray(8 * 3 * 2)
-    private val brn = FloatArray(10 * 4 * 2)
+    private val brn = FloatArray(BR_COUNT * BR_PTS * 2)
     private val bStart = FloatArray(8)
-    private val brnStart = FloatArray(10)
+    private val brnStart = FloatArray(BR_COUNT)
     private val pieceDir = FloatArray(8)
     private val detT = FloatArray(6)
     private val detIdx = intArrayOf(1, 4, 6, 2, 7, 0)
     private val evT = FloatArray(16)
     private val piece = Path()
+    private val cpx = FloatArray(16)
+    private val cpy = FloatArray(16)
+    private val edgeP = Path()
     private val locBuf = IntArray(2)
     private var bgOffX = 0f
     private var bgOffY = 0f
@@ -1165,39 +1175,45 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     }
 
     // ------------------------------------------------------------ luna rota
+    // Grietas de roca: cada una avanza del centro al borde en tramos rectos que cambian
+    // bruscamente de rumbo; entre ellas hay fracturas en anillo y ramificaciones finas.
     private fun buildCracks() {
-        val radii = floatArrayOf(0f, 0.15f, 0.3f, 0.45f, 0.62f, 0.8f, 1f)
         for (i in 0 until 8) {
-            var a = i * TAU / 8f + (hwHash(i, 200) - 0.5f) * 0.45f
-            for (k in 0..6) {
-                a += (hwHash(i * 7 + k, 201) - 0.5f) * 0.22f
-                val r = if (k == 0) 0f else if (k == 6) 1f else radii[k] + (hwHash(i * 7 + k, 202) - 0.5f) * 0.06f
-                bnd[(i * 7 + k) * 2] = cos(a) * r
-                bnd[(i * 7 + k) * 2 + 1] = sin(a) * r
+            val a0 = i * TAU / 8f + (hwHash(i, 200) - 0.5f) * 0.45f
+            val ca = cos(a0)
+            val sa = sin(a0)
+            var lat = 0f
+            for (k in 0 until CK) {
+                val r = if (k <= CR) k * 0.075f else 0.45f + (k - CR) * (0.55f / (CK - 1 - CR))
+                lat = if (k == 0 || k == CK - 1) 0f else lat * 0.45f + (hwHash(i * 31 + k, 202) - 0.5f) * 0.12f
+                val env = min(1f, r * 7f) * min(1f, (1f - r) * 6f)
+                val l = lat * env
+                bnd[(i * CK + k) * 2] = ca * r - sa * l
+                bnd[(i * CK + k) * 2 + 1] = sa * r + ca * l
             }
             bStart[i] = 0.02f + 0.5f * hwHash(i, 203)
         }
         for (i in 0 until 8) {
             val j = (i + 1) % 8
-            val px = bnd[(i * 7 + 3) * 2]
-            val py = bnd[(i * 7 + 3) * 2 + 1]
-            val qx = bnd[(j * 7 + 3) * 2]
-            val qy = bnd[(j * 7 + 3) * 2 + 1]
-            ringP[(i * 5) * 2] = px
-            ringP[(i * 5) * 2 + 1] = py
-            ringP[(i * 5 + 4) * 2] = qx
-            ringP[(i * 5 + 4) * 2 + 1] = qy
-            for (m in 1..3) {
-                val u = m / 4f
+            val px = bnd[(i * CK + CR) * 2]
+            val py = bnd[(i * CK + CR) * 2 + 1]
+            val qx = bnd[(j * CK + CR) * 2]
+            val qy = bnd[(j * CK + CR) * 2 + 1]
+            ringP[(i * RPN) * 2] = px
+            ringP[(i * RPN) * 2 + 1] = py
+            ringP[(i * RPN + RPN - 1) * 2] = qx
+            ringP[(i * RPN + RPN - 1) * 2 + 1] = qy
+            for (m in 1 until RPN - 1) {
+                val u = m / (RPN - 1f)
                 val mx = px + (qx - px) * u
                 val my = py + (qy - py) * u
                 val len = sqrt(mx * mx + my * my) + 0.0001f
-                val rr = 0.45f + (hwHash(i * 5 + m, 204) - 0.5f) * 0.1f
-                ringP[(i * 5 + m) * 2] = mx / len * rr
-                ringP[(i * 5 + m) * 2 + 1] = my / len * rr
+                val rr = 0.45f + (hwHash(i * 11 + m, 204) - 0.5f) * 0.1f
+                ringP[(i * RPN + m) * 2] = mx / len * rr
+                ringP[(i * RPN + m) * 2 + 1] = my / len * rr
             }
-            val a1 = atan2(bnd[(i * 7 + 6) * 2 + 1], bnd[(i * 7 + 6) * 2])
-            var a2 = atan2(bnd[(j * 7 + 6) * 2 + 1], bnd[(j * 7 + 6) * 2])
+            val a1 = atan2(bnd[(i * CK + CK - 1) * 2 + 1], bnd[(i * CK + CK - 1) * 2])
+            var a2 = atan2(bnd[(j * CK + CK - 1) * 2 + 1], bnd[(j * CK + CK - 1) * 2])
             if (a2 < a1) a2 += TAU
             for (m in 0..2) {
                 val aa = a1 + (a2 - a1) * (m + 1) / 4f
@@ -1206,19 +1222,24 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
             }
             pieceDir[i] = (a1 + a2) * 0.5f
         }
-        for (b in 0 until 10) {
+        for (b in 0 until BR_COUNT) {
             val bi = b % 8
-            val k0 = 2 + (b % 3)
-            var x = bnd[(bi * 7 + k0) * 2]
-            var y = bnd[(bi * 7 + k0) * 2 + 1]
-            var a = atan2(y, x) + (if (b % 2 == 0) 0.7f else -0.7f) * (0.6f + 0.6f * hwHash(b, 205))
-            val len = 0.22f + 0.18f * hwHash(b, 206)
-            for (k in 0..3) {
-                brn[(b * 4 + k) * 2] = x
-                brn[(b * 4 + k) * 2 + 1] = y
-                a += (hwHash(b * 4 + k, 207) - 0.5f) * 0.8f
-                x += cos(a) * len / 3f
-                y += sin(a) * len / 3f
+            val k0 = 3 + ((b * 5 + (b / 8) * 3) % 8)
+            var x = bnd[(bi * CK + k0) * 2]
+            var y = bnd[(bi * CK + k0) * 2 + 1]
+            var a = atan2(y, x) + (if (hwHash(b, 215) < 0.5f) 1f else -1f) * (0.45f + 0.7f * hwHash(b, 205))
+            val len = 0.14f + 0.2f * hwHash(b, 206)
+            for (k in 0 until BR_PTS) {
+                brn[(b * BR_PTS + k) * 2] = x
+                brn[(b * BR_PTS + k) * 2 + 1] = y
+                a += (hwHash(b * 8 + k, 207) - 0.5f) * 1.1f
+                x += cos(a) * len / (BR_PTS - 1)
+                y += sin(a) * len / (BR_PTS - 1)
+                val rr = sqrt(x * x + y * y)
+                if (rr > 0.97f) {
+                    x *= 0.97f / rr
+                    y *= 0.97f / rr
+                }
             }
             brnStart[b] = 0.3f + 0.45f * hwHash(b, 208)
         }
@@ -1236,43 +1257,114 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private fun piecePath(i: Int) {
         val j = (i + 1) % 8
         piece.reset()
-        piece.moveTo(bnd[(i * 7 + 3) * 2], bnd[(i * 7 + 3) * 2 + 1])
-        for (k in 4..6) piece.lineTo(bnd[(i * 7 + k) * 2], bnd[(i * 7 + k) * 2 + 1])
+        piece.moveTo(bnd[(i * CK + CR) * 2], bnd[(i * CK + CR) * 2 + 1])
+        for (k in CR + 1 until CK) piece.lineTo(bnd[(i * CK + k) * 2], bnd[(i * CK + k) * 2 + 1])
         for (m in 0..2) piece.lineTo(arcP[(i * 3 + m) * 2], arcP[(i * 3 + m) * 2 + 1])
-        for (k in 6 downTo 3) piece.lineTo(bnd[(j * 7 + k) * 2], bnd[(j * 7 + k) * 2 + 1])
-        for (m in 3 downTo 1) piece.lineTo(ringP[(i * 5 + m) * 2], ringP[(i * 5 + m) * 2 + 1])
+        for (k in CK - 1 downTo CR) piece.lineTo(bnd[(j * CK + k) * 2], bnd[(j * CK + k) * 2 + 1])
+        for (m in RPN - 2 downTo 1) piece.lineTo(ringP[(i * RPN + m) * 2], ringP[(i * RPN + m) * 2 + 1])
         piece.close()
     }
 
-    // arma en tmp el tramo de la grieta que ya se abrio (g de 0 a 1)
-    private fun partialPath(arr: FloatArray, base: Int, n: Int, g: Float) {
+    // arma en tmp el contorno de la fisura (ancha cerca del centro, con la punta finísima)
+    // y, si se pide, en edgeP el borde izquierdo (el que atrapa la luz)
+    private fun fissurePoly(cnt: Int, wMax: Float, m: Float, growing: Boolean, seed: Int, edge: Boolean) {
+        tmp.reset()
+        if (edge) edgeP.reset()
+        val last = (cnt - 1).toFloat()
+        for (pass in 0..1) {
+            for (q in 0 until cnt) {
+                val i = if (pass == 0) q else cnt - 1 - q
+                val i0 = if (i > 0) i - 1 else i
+                val i1 = if (i < cnt - 1) i + 1 else i
+                var tx = cpx[i1] - cpx[i0]
+                var ty = cpy[i1] - cpy[i0]
+                val tl = sqrt(tx * tx + ty * ty) + 0.00001f
+                tx /= tl
+                ty /= tl
+                val s = i / last
+                var w = wMax * m * (1f - 0.72f * s) * (0.65f + 0.7f * hwHash(seed * 17 + i, 216))
+                if (growing) w *= min(1f, (1f - s) * 5f)
+                val px: Float
+                val py: Float
+                if (pass == 0) {
+                    val fl = 0.75f + 0.5f * hwHash(seed * 17 + i, 217)
+                    px = cpx[i] - ty * w * fl
+                    py = cpy[i] + tx * w * fl
+                    if (edge) {
+                        if (q == 0) edgeP.moveTo(px, py) else edgeP.lineTo(px, py)
+                    }
+                } else {
+                    val fr = 0.75f + 0.5f * hwHash(seed * 17 + i, 218)
+                    px = cpx[i] + ty * w * fr
+                    py = cpy[i] - tx * w * fr
+                }
+                if (pass == 0 && q == 0) tmp.moveTo(px, py) else tmp.lineTo(px, py)
+            }
+        }
+        tmp.close()
+    }
+
+    // Dibuja una grieta como fisura de roca: negra, con la punta finísima y el borde astillado;
+    // a medida que se abre deja salir luz por dentro. g = cuánto avanzó (0 a 1), op = cuánto se abrió.
+    private fun drawFissure(c: Canvas, arr: FloatArray, base: Int, n: Int, g: Float, op: Float, light: Float, charge: Float, heat: Float, mr: Float, wk: Float, seed: Int) {
         val total = g * (n - 1)
         var full = total.toInt()
         if (full > n - 1) full = n - 1
-        tmp.reset()
-        tmp.moveTo(arr[base * 2], arr[base * 2 + 1])
-        for (k in 1..full) tmp.lineTo(arr[(base + k) * 2], arr[(base + k) * 2 + 1])
+        var cnt = 0
+        for (k in 0..full) {
+            cpx[cnt] = arr[(base + k) * 2]
+            cpy[cnt] = arr[(base + k) * 2 + 1]
+            cnt++
+        }
         if (full < n - 1) {
             val fr = total - full
             val a0 = (base + full) * 2
             val b0 = (base + full + 1) * 2
-            tmp.lineTo(arr[a0] + (arr[b0] - arr[a0]) * fr, arr[a0 + 1] + (arr[b0 + 1] - arr[a0 + 1]) * fr)
+            cpx[cnt] = arr[a0] + (arr[b0] - arr[a0]) * fr
+            cpy[cnt] = arr[a0 + 1] + (arr[b0 + 1] - arr[a0 + 1]) * fr
+            cnt++
         }
-    }
-
-    private fun strokeCrack(c: Canvas, op: Float, light: Float, charge: Float, mr: Float, wk: Float) {
+        if (cnt < 2) return
+        val u = d / mr * wk
+        val wMax = (0.55f + 1.5f * op) * u
+        val growing = g < 1f
+        val glow = (0.1f + 0.75f * op) * heat * light + charge * 0.35f * op
+        // resplandor suave alrededor de la fisura
+        if (glow > 0.03f) {
+            edgeP.reset()
+            edgeP.moveTo(cpx[0], cpy[0])
+            for (k in 1 until cnt) edgeP.lineTo(cpx[k], cpy[k])
+            pFireS.color = hc(0xFFFF8A2A)
+            pFireS.alpha = (glow * 0.4f * 255f).toInt().coerceIn(0, 255)
+            pFireS.strokeWidth = (2.2f + 4f * op) * u
+            c.drawPath(edgeP, pFireS)
+        }
+        // hueco oscuro de la roca
+        fissurePoly(cnt, wMax, 1f, growing, seed, true)
+        pFill.shader = null
+        pFill.color = hc(0xFF150803)
+        pFill.alpha = ((0.6f + 0.4f * op) * 255f).toInt().coerceIn(0, 255)
+        c.drawPath(tmp, pFill)
+        // borde astillado que atrapa la luz
         pStroke.shader = null
-        pStroke.color = hc(0xDD1E0A00)
-        pStroke.strokeWidth = (2.6f + 3f * op) * wk * d / mr
-        c.drawPath(tmp, pStroke)
-        pFireS.color = hc(0xFFFF7A18)
-        pFireS.alpha = (((0.35f + 0.4f * op) * light + charge * 0.3f) * 255f).toInt().coerceIn(0, 255)
-        pFireS.strokeWidth = (4f + 9f * op) * wk * d / mr
-        c.drawPath(tmp, pFireS)
-        pFireS.color = hc(0xFFFFF0B8)
-        pFireS.alpha = ((0.5f + 0.5f * op) * light * 255f).toInt().coerceIn(0, 255)
-        pFireS.strokeWidth = (1.2f + 2.6f * op) * wk * d / mr
-        c.drawPath(tmp, pFireS)
+        pStroke.color = hc(0xFFFFE6B0)
+        pStroke.alpha = (0.3f * op * 255f).toInt().coerceIn(0, 255)
+        pStroke.strokeWidth = 0.6f * u
+        c.drawPath(edgeP, pStroke)
+        // luz que sale desde dentro
+        if (glow > 0.02f) {
+            fissurePoly(cnt, wMax, 0.55f, growing, seed, false)
+            pFire.shader = null
+            pFire.color = hc(0xFFFF7A18)
+            pFire.alpha = (glow * 255f).toInt().coerceIn(0, 255)
+            c.drawPath(tmp, pFire)
+            if (op > 0.25f) {
+                fissurePoly(cnt, wMax, 0.22f, growing, seed, false)
+                pFire.color = hc(0xFFFFF0B8)
+                pFire.alpha = (glow * 255f).toInt().coerceIn(0, 255)
+                c.drawPath(tmp, pFire)
+            }
+        }
     }
 
     // elige un hueco sin botones para la luna (solo cuando no se esta rompiendo)
@@ -1391,6 +1483,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         c.drawCircle(-0.05f, 0.45f, 0.16f, pFill)
         if (e < 0f && crackP > 0f) {
             val light = 0.85f + 0.15f * pulse
+            val heat = 0.25f + 0.75f * crackP
             // hueco brillante donde ya se desprendio un trozo
             for (k in 0 until 6) {
                 if (ct - detT[k] < 0f) continue
@@ -1405,8 +1498,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 val g = ((crackP - bStart[i]) / 0.35f).coerceIn(0f, 1f)
                 if (g <= 0f) continue
                 val op = ((crackP - bStart[i]) / 0.5f).coerceIn(0f, 1f)
-                partialPath(bnd, i * 7, 7, g)
-                strokeCrack(c, op, light, charge, mr, 1f)
+                drawFissure(c, bnd, i * CK, CK, g, op, light, charge, heat, mr, 1f, i)
             }
             // fracturas circulares que separan los trozos
             for (i in 0 until 8) {
@@ -1415,16 +1507,14 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 val g = ((crackP - s0) / 0.25f).coerceIn(0f, 1f)
                 if (g <= 0f) continue
                 val op = ((crackP - s0) / 0.4f).coerceIn(0f, 1f)
-                partialPath(ringP, i * 5, 5, g)
-                strokeCrack(c, op, light, charge, mr, 0.75f)
+                drawFissure(c, ringP, i * RPN, RPN, g, op, light, charge, heat, mr, 0.7f, 20 + i)
             }
             // ramificaciones finas
-            for (b in 0 until 10) {
+            for (b in 0 until BR_COUNT) {
                 val g = ((crackP - brnStart[b]) / 0.25f).coerceIn(0f, 1f)
                 if (g <= 0f) continue
                 val op = ((crackP - brnStart[b]) / 0.4f).coerceIn(0f, 1f)
-                partialPath(brn, b * 4, 4, g)
-                strokeCrack(c, op, light, charge, mr, 0.5f)
+                drawFissure(c, brn, b * BR_PTS, BR_PTS, g, op, light, charge, heat, mr, 0.45f, 40 + b)
             }
             // rayos de luz que se escapan por el borde
             if (crackP > 0.6f) {
@@ -1432,8 +1522,8 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 pFire.shader = null
                 pFire.color = hc(0xFFFFD27A)
                 for (i in 0 until 8) {
-                    val rx = bnd[(i * 7 + 6) * 2]
-                    val ry = bnd[(i * 7 + 6) * 2 + 1]
+                    val rx = bnd[(i * CK + CK - 1) * 2]
+                    val ry = bnd[(i * CK + CK - 1) * 2 + 1]
                     val fl = 0.6f + 0.4f * sin(t * (9f + i) + i)
                     pFire.alpha = (ba * ba * fl * 150f).toInt().coerceIn(0, 255)
                     val len = 0.9f + 0.9f * hwHash(i, 213)
@@ -1476,15 +1566,15 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 c.drawPath(piece, pStroke)
                 c.restore()
             }
-            // pequenas rupturas: piedritas que saltan con cada crujido
+            // pequenas rupturas: esquirlas de roca que saltan con cada crujido
             pFill.shader = null
             for (k in 0 until 16) {
                 val tau = ct - evT[k]
                 if (tau < 0f || tau > 1.5f) continue
                 for (n in 0..1) {
                     val b = (k + n * 3) % 8
-                    val rx = bnd[(b * 7 + 6) * 2]
-                    val ry = bnd[(b * 7 + 6) * 2 + 1]
+                    val rx = bnd[(b * CK + CK - 1) * 2]
+                    val ry = bnd[(b * CK + CK - 1) * 2 + 1]
                     val sp = 0.35f + 0.5f * hwHash(k * 2 + n, 210)
                     val sd = (hwHash(k * 2 + n, 211) - 0.5f) * 0.8f
                     val px = rx + (rx * sp + sd) * tau
@@ -1496,7 +1586,12 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                     c.save()
                     c.translate(px, py)
                     c.rotate(tau * 400f * (if (n == 0) 1f else -1f))
-                    c.drawRect(-sz, -sz * 0.7f, sz, sz * 0.7f, pFill)
+                    tmp.reset()
+                    tmp.moveTo(-sz, -sz * 0.6f)
+                    tmp.lineTo(sz * 1.1f, -sz * 0.2f)
+                    tmp.lineTo(-sz * 0.2f, sz * 0.9f)
+                    tmp.close()
+                    c.drawPath(tmp, pFill)
                     c.restore()
                 }
             }
@@ -2814,31 +2909,73 @@ private class HwSound {
         return o
     }
 
-    // crujido de roca: ruido grave que se apaga, pulsos de friccion y un quejido bajo
+    // crujido de roca: chasquido seco al partirse (sin subida suave), golpe sordo de la piedra
+    // con resonancias que se apagan rapido, gravilla que roza y astillas que caen rebotando
     private fun synthCreak(dur: Float, seed: Long, f0: Float): ShortArray {
         val n = (dur * sr).toInt()
         val f = FloatArray(n)
         val r = java.util.Random(seed)
-        var lp1 = 0f
-        var lp2 = 0f
+        // resonancias de la roca (inarmonicas, se apagan rapido); las dos ultimas se oyen bien en bocinas de telefono
+        val nm = 6
+        val mf = floatArrayOf(f0 * 2.1f, f0 * 3.4f, f0 * 5.9f, f0 * 9.7f, 1350f, 2300f)
+        val md = floatArrayOf(26f, 38f, 55f, 80f, 110f, 150f)
+        val mg = floatArrayOf(1f, 0.7f, 0.45f, 0.3f, 0.3f, 0.2f)
+        val pm = FloatArray(nm)
+        // 1) golpes: el primero es el chasquido principal, luego cae una lluvia de astillas cada vez mas suaves
+        val ne = 5 + (dur * 7f).toInt()
+        for (e in 0 until ne) {
+            val te = when (e) {
+                0 -> 0f
+                1 -> 0.02f + 0.05f * r.nextFloat()
+                else -> dur * (0.08f + 0.62f * r.nextFloat().pow(1.5f))
+            }
+            val amp = when (e) {
+                0 -> 1f
+                1 -> 0.7f
+                else -> 0.5f * exp(-te * 2.2f / dur) * (0.4f + 0.6f * r.nextFloat())
+            }
+            val sc = if (e == 0) 1f else 0.8f + 1.1f * r.nextFloat()
+            val dm = if (e == 0) 1f else 1.4f
+            for (m in 0 until nm) pm[m] = r.nextFloat() * TAU
+            val i0 = (te * sr).toInt()
+            val len = min(n - i0, (0.35f * sr).toInt())
+            var lp = 0f
+            for (j in 0 until len) {
+                val t = j.toFloat() / sr
+                val x = r.nextFloat() * 2f - 1f
+                lp += 0.4f * (x - lp)
+                val click = (x - lp) * exp(-t * 700f)
+                val grain = lp * exp(-t * 90f) * 0.6f
+                var body = 0f
+                for (m in 0 until nm) body += sin(TAU * mf[m] * sc * t + pm[m]) * exp(-t * md[m] * dm) * mg[m]
+                f[i0 + j] += amp * (click * 2.2f + grain + body * 0.9f)
+            }
+        }
+        // 2) golpe sordo inicial de la piedra al ceder
+        val nth = min(n, (0.4f * sr).toInt())
         var ph = 0f
-        var burst = 0f
+        for (i in 0 until nth) {
+            val t = i.toFloat() / sr
+            ph += TAU * (f0 * 1.1f * exp(-t * 6f) + 25f) / sr
+            f[i] += sin(ph) * exp(-t * 12f) * 0.8f
+        }
+        // 3) gravilla: roce de granos sueltos que se va apagando
+        val rr = 0.9f
+        val a1 = -2f * rr * cos(TAU * 1700f / sr)
+        val a2 = rr * rr
+        var y1 = 0f
+        var y2 = 0f
         for (i in 0 until n) {
             val t = i.toFloat() / sr
             val u = t / dur
-            val env = (1f - u).pow(1.6f) * min(1f, t * 60f)
-            val cut = 0.02f + 0.10f * (1f - u)
-            val x = r.nextFloat() * 2f - 1f
-            lp1 += cut * (x - lp1)
-            lp2 += cut * (lp1 - lp2)
-            val pulse = 0.55f + 0.45f * sin(TAU * (18f + 6f * sin(t * 3f)) * t)
-            ph += TAU * (f0 * (1f - 0.4f * u) + 6f * sin(t * 9f)) / sr
-            if (r.nextFloat() < 0.0012f + 0.0015f * (1f - u)) burst = 1f + r.nextFloat()
-            burst *= 0.9f
-            val crackle = burst * (r.nextFloat() * 2f - 1f) * 0.6f
-            val s = (lp2 * 6f * pulse + sin(ph) * 0.3f + crackle) * env
-            f[i] = tanh(s * 0.9f)
+            val rate = 900f * (1f - u).pow(2f) * min(1f, t * 20f)
+            val x = if (r.nextFloat() < rate / sr) r.nextFloat() * 2f - 1f else 0f
+            val y = x - a1 * y1 - a2 * y2
+            y2 = y1
+            y1 = y
+            f[i] += y * 0.35f
         }
+        for (i in 0 until n) f[i] = tanh(f[i] * 1.5f)
         return toPcm(f, 0.85f)
     }
 
