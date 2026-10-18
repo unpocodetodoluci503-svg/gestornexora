@@ -312,6 +312,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     private val cardF = FloatArray(maxCards * 9)
     private val cardSeed = IntArray(maxCards)
     private var cardN = 0
+    private var scanVisited = 0
 
     // fondo
     private var bgW = 0f
@@ -2387,6 +2388,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         drawEmbers(c)
         cardN = 0
         btnN = 0
+        scanVisited = 0
         val par = parent as? ViewGroup
         if (par != null) {
             for (i in 0 until par.childCount) {
@@ -2394,6 +2396,8 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
                 if (ch !== this) scan(ch, 0f, 0f, 0f, 0f, W, H)
             }
         }
+        // con muchas vistas en pantalla los efectos bajan de frecuencia para no trabar la app
+        minStepNs = if (lite || scanVisited > 350) 50000000L else 33000000L
         drawBlood(c)
         drawSmoke(c)
         drawMoon(c)
@@ -2719,6 +2723,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     // -------------------------------------------------------------------- sangre
     private fun scan(v: View, ox: Float, oy: Float, cl: Float, ct: Float, cr: Float, cb: Float) {
         if (v === this || v.visibility != View.VISIBLE || v.alpha < 0.3f) return
+        scanVisited++
         val x = ox + v.left + v.translationX
         val y = oy + v.top + v.translationY
         val wv = v.width.toFloat()
