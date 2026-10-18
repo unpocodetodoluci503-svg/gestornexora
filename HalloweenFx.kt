@@ -479,6 +479,8 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         }
     }
 
+    private fun rf(a: Float, b: Float): Float = a + (b - a) * rnd.nextFloat()
+
     // ---------------------------------------------------------------- ciclo
     fun setActive(on: Boolean) {
         active = on
