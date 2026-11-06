@@ -22,6 +22,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
+import android.graphics.SweepGradient
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -98,6 +99,21 @@ private class HJob(val size: Long, val f: File) {
 }
 private data class Seccion(val titulo: String, val puntos: List<String>)
 private data class Entrada(val version: String, val fecha: String?, val titulo: String, val resumen: String, val secciones: List<Seccion>)
+// Categorías de Novedades por tamaño (0=menor a 4=mayor), con identidad visual propia:
+// 0 Ajuste (gris), 1 Actualización (azul), 2 Gran actualización (violeta),
+// 3 Hiper actualización (naranja), 4 Actualización cósmica (dorado).
+private val TIER_COLOR = intArrayOf(c(0xFF9AA3B2), c(0xFF4C8DFF), c(0xFFA855F7), c(0xFFFF8E3C), c(0xFFF4C244))
+private val TIER_NAME = arrayOf("Ajuste", "Actualización", "Gran actualización", "Hiper actualización", "Actualización cósmica")
+private fun tierFor(e: Entrada): Int {
+    val n = e.secciones.sumOf { it.puntos.size }
+    return when {
+        n <= 1 -> 0
+        n <= 4 -> 1
+        n <= 8 -> 2
+        n <= 14 -> 3
+        else -> 4
+    }
+}
 private data class Fondo(val nombre: String, val top: Int, val bottom: Int, val card: Int)
 private data class Acento(val nombre: String, val c1: Int, val c2: Int)
 private class Plan(val orig: File, val newName: String, val status: String, val ok: Boolean)
@@ -858,6 +874,20 @@ class MainActivity : Activity() {
         else -> "•"
     }
 
+    // Insignia de categoría de una entrada de Novedades: ícono espacial dibujado a mano + etiqueta.
+    private fun newsBadge(tier: Int): View {
+        val col = TIER_COLOR[tier]
+        val row = LinearLayout(this)
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(8), dp(5), dp(12), dp(5))
+        row.background = rounded(alpha(col, 0x24), 20)
+        row.addView(BadgeIcon(this, tier, col), lp(dp(16), dp(16)))
+        val label = txt(TIER_NAME[tier], 11f, col, true)
+        label.letterSpacing = 0.02f
+        row.addView(label, lp(-2, -2).also { it.leftMargin = dp(7) })
+        return row
+    }
+
     private fun showNews() {
         val prev = seenEntries()
         prefs.edit().putInt("seenE", historial.size).apply()
@@ -897,7 +927,8 @@ class MainActivity : Activity() {
                 head.addView(nt, lp(-2, -2).also { it.leftMargin = dp(10) })
             }
             card.addView(head)
-            card.addView(txt(e.titulo, 17f, TXT, true), lp(-1, -2).also { it.topMargin = dp(8) })
+            card.addView(newsBadge(tierFor(e)), lp(-2, -2).also { it.topMargin = dp(10) })
+            card.addView(txt(e.titulo, 17f, TXT, true), lp(-1, -2).also { it.topMargin = dp(7) })
             card.addView(txt(e.resumen, 13f, MUTE), lp(-1, -2).also { it.topMargin = dp(4) })
 
             val details = LinearLayout(this)
@@ -1057,6 +1088,26 @@ class MainActivity : Activity() {
         hs3.addView(r3)
         b.addView(hs3)
         b.addView(txt("Tus elecciones se guardan y se aplican al instante.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(18) })
+
+        b.addView(sectionTitle("Temas especiales"))
+        val hwOn = prefs.getBoolean("hwThemeOn", true)
+        val hwTile = LinearLayout(this)
+        hwTile.orientation = LinearLayout.VERTICAL
+        hwTile.gravity = Gravity.CENTER_HORIZONTAL
+        val hwIcon = txt("🎃", 22f, TXT)
+        hwIcon.gravity = Gravity.CENTER
+        val hwG = rounded(alpha(Color.WHITE, 0x10), 14)
+        if (hwOn) hwG.setStroke(dp(3), ACC2) else hwG.setStroke(dp(1), alpha(Color.WHITE, 0x33))
+        hwIcon.background = hwG
+        hwTile.addView(hwIcon, lp(dp(60), dp(60)))
+        hwTile.addView(txt(if (hwOn) "Halloween 2026 (activo)" else "Halloween 2026", 11f, if (hwOn) ACC2 else TXT), lp(-2, -2).also { it.topMargin = dp(6) })
+        hwTile.setOnClickListener {
+            prefs.edit().putBoolean("hwThemeOn", !hwOn).apply()
+            recreate()
+        }
+        b.addView(hwTile, lp(-2, -2).also { it.topMargin = dp(8) })
+        b.addView(txt("Apaga o enciende la decoración animada de Halloween (luna, calaveras, calabazas y demás efectos) sin perder tu fondo, color y tipografía.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(10) })
+
         page("Personalización", b)
     }
 
@@ -6571,32 +6622,41 @@ class MainActivity : Activity() {
     }
 
     private fun progressDialog(title: String, onCancel: () -> Unit): ProgUi {
-        val nt = txt("Preparando…", 13f, MUTE)
+        val ring = ProgressRing(this)
+        ring.setColors(ACC, ACC2)
+        val pctT = txt("0%", 30f, TXT, true)
+        pctT.gravity = Gravity.CENTER
+        val titleT = txt(title, 15f, MUTE, true)
+        titleT.gravity = Gravity.CENTER
+        val nt = txt("Preparando…", 13f, TXT)
         nt.isSingleLine = true
         nt.ellipsize = TextUtils.TruncateAt.MIDDLE
-        val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-        pb.max = 1000
-        pb.isIndeterminate = true
+        nt.gravity = Gravity.CENTER
         val pt = txt("", 12f, MUTE)
+        pt.gravity = Gravity.CENTER
         val d = showSheet(false) { _ ->
             val col = LinearLayout(this)
             col.orientation = LinearLayout.VERTICAL
-            col.addView(txt(title, 18f, TXT, true))
-            col.addView(nt, lp(-1, -2).also { it.topMargin = dp(12) })
-            col.addView(pb, lp(-1, dp(14)).also { it.topMargin = dp(10) })
-            col.addView(pt, lp(-1, -2).also { it.topMargin = dp(6) })
+            col.gravity = Gravity.CENTER_HORIZONTAL
+            col.addView(titleT, lp(-1, -2))
+            val ringBox = FrameLayout(this)
+            ringBox.addView(ring, FrameLayout.LayoutParams(dp(132), dp(132)))
+            ringBox.addView(pctT, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+            col.addView(ringBox, lp(dp(132), dp(132)).also { it.topMargin = dp(18) })
+            col.addView(nt, lp(-1, -2).also { it.topMargin = dp(18) })
+            col.addView(pt, lp(-1, -2).also { it.topMargin = dp(4) })
             val cancel = ghostButton("Cancelar")
             cancel.setOnClickListener {
                 onCancel()
                 cancel.isEnabled = false
                 cancel.text = "Cancelando…"
             }
-            col.addView(cancel, lp(-1, dp(46)).also { it.topMargin = dp(14) })
+            col.addView(cancel, lp(-1, dp(46)).also { it.topMargin = dp(20) })
             col
         }
         d.setCancelable(false)
         d.setCanceledOnTouchOutside(false)
-        return ProgUi(d, nt, pb, pt) { fmtS(it) }
+        return ProgUi(d, pctT, nt, ring, pt) { fmtS(it) }
     }
 
     private fun openArchive(f: File) {
@@ -7443,17 +7503,19 @@ private class ArcPO(val o: java.io.OutputStream, val tick: (Long) -> Unit, val c
     }
 }
 
-private class ProgUi(val dlg: Dialog, val nameT: TextView, val bar: ProgressBar, val pctT: TextView, val fmt: (Long) -> String) {
+private class ProgUi(val dlg: Dialog, val pctT: TextView, val nameT: TextView, val ring: ProgressRing, val sizeT: TextView, val fmt: (Long) -> String) {
     fun update(name: String, bytes: Long, total: Long) {
         nameT.post {
             nameT.text = name
             if (total > 0L) {
-                bar.isIndeterminate = false
-                bar.progress = (bytes * 1000L / total).toInt().coerceIn(0, 1000)
-                pctT.text = fmt(bytes) + " de " + fmt(total)
+                val pct = (bytes * 100L / total).toInt().coerceIn(0, 100)
+                ring.setProgress01(pct / 100f)
+                pctT.text = pct.toString() + "%"
+                sizeT.text = fmt(bytes) + " de " + fmt(total)
             } else {
-                bar.isIndeterminate = true
-                pctT.text = fmt(bytes)
+                ring.setIndeterminate(true)
+                pctT.text = "…"
+                sizeT.text = fmt(bytes)
             }
         }
     }
@@ -7463,6 +7525,174 @@ private class ProgUi(val dlg: Dialog, val nameT: TextView, val bar: ProgressBar,
             dlg.dismiss()
         } catch (e: Exception) {
         }
+    }
+}
+
+// Anillo circular de progreso: pista tenue + arco con el color de acento, usado en
+// los diálogos de "Extrayendo…" y "Comprimiendo…". Gira en modo indeterminado.
+private class ProgressRing(ctx: Context) : View(ctx) {
+    private val d = ctx.resources.displayMetrics.density
+    private val trackP = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val fgP = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val rect = RectF()
+    private var frac = 0f
+    private var indet = true
+    private var spin = 0f
+    private var c1 = -0xC28501
+    private var c2 = -0xDD2D00
+
+    init {
+        trackP.style = Paint.Style.STROKE
+        trackP.strokeCap = Paint.Cap.ROUND
+        trackP.color = 0x20FFFFFF
+        fgP.style = Paint.Style.STROKE
+        fgP.strokeCap = Paint.Cap.ROUND
+        fgP.color = c1
+    }
+
+    fun setColors(a: Int, b: Int) {
+        c1 = a
+        c2 = b
+        invalidate()
+    }
+
+    fun setIndeterminate(on: Boolean) {
+        if (indet != on) {
+            indet = on
+            invalidate()
+        }
+    }
+
+    fun setProgress01(p: Float) {
+        indet = false
+        frac = p.coerceIn(0f, 1f)
+        invalidate()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        super.onSizeChanged(w, h, ow, oh)
+        val sw = 9f * d
+        trackP.strokeWidth = sw
+        fgP.strokeWidth = sw
+        val m = sw / 2f + 2f * d
+        rect.set(m, m, (w - m), (h - m))
+    }
+
+    private fun alphaOf(col: Int, a: Int): Int = (col and 0x00FFFFFF) or (a shl 24)
+
+    override fun onDraw(c: Canvas) {
+        c.drawArc(rect, 0f, 360f, false, trackP)
+        if (indet) {
+            spin = (spin + 9f) % 360f
+            fgP.shader = SweepGradient(rect.centerX(), rect.centerY(), intArrayOf(alphaOf(c2, 0), c1, c2), null)
+            c.save()
+            c.rotate(spin, rect.centerX(), rect.centerY())
+            c.drawArc(rect, 0f, 100f, false, fgP)
+            c.restore()
+            postInvalidateOnAnimation()
+        } else {
+            fgP.shader = null
+            fgP.color = c1
+            c.drawArc(rect, -90f, 360f * frac, false, fgP)
+        }
+    }
+}
+
+// Ícono espacial de cada categoría de Novedades (0 a 4, de menor a mayor importancia):
+// 0 asteroide, 1 destello, 2 planeta con anillo, 3 cometa, 4 estallido cósmico.
+private class BadgeIcon(ctx: Context, private val tier: Int, private val col: Int) : View(ctx) {
+    private val d = ctx.resources.displayMetrics.density
+    private val fillP = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = col }
+    private val strokeP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        color = col
+    }
+    private val path = Path()
+    private val oval = RectF()
+
+    private fun sinD(deg: Float): Float = Math.sin(Math.toRadians(deg.toDouble())).toFloat()
+    private fun cosD(deg: Float): Float = Math.cos(Math.toRadians(deg.toDouble())).toFloat()
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val cx = w / 2f
+        val cy = h / 2f
+        val r = Math.min(w, h) / 2f
+        when (tier) {
+            0 -> drawAsteroide(c, cx, cy, r)
+            1 -> drawDestello(c, cx, cy, r)
+            2 -> drawPlaneta(c, cx, cy, r)
+            3 -> drawCometa(c, cx, cy, r)
+            else -> drawEstallido(c, cx, cy, r)
+        }
+    }
+
+    // 0 · Ajuste: un punto pequeño con un halo fino, como un cuerpo menor.
+    private fun drawAsteroide(c: Canvas, cx: Float, cy: Float, r: Float) {
+        strokeP.strokeWidth = r * 0.16f
+        strokeP.alpha = 140
+        c.drawCircle(cx, cy, r * 0.8f, strokeP)
+        strokeP.alpha = 255
+        c.drawCircle(cx, cy, r * 0.38f, fillP)
+    }
+
+    // 1 · Actualización: un destello de 4 puntas, simple y nítido.
+    private fun drawDestello(c: Canvas, cx: Float, cy: Float, r: Float) {
+        path.reset()
+        val rOut = r * 0.98f
+        val rIn = r * 0.34f
+        for (i in 0 until 8) {
+            val deg = i * 45f
+            val rr = if (i % 2 == 0) rOut else rIn
+            val x = cx + sinD(deg) * rr
+            val y = cy - cosD(deg) * rr
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        path.close()
+        c.drawPath(path, fillP)
+    }
+
+    // 2 · Gran actualización: un planeta con un anillo inclinado.
+    private fun drawPlaneta(c: Canvas, cx: Float, cy: Float, r: Float) {
+        c.drawCircle(cx, cy, r * 0.5f, fillP)
+        strokeP.strokeWidth = r * 0.15f
+        c.save()
+        c.rotate(-18f, cx, cy)
+        oval.set(cx - r * 0.97f, cy - r * 0.3f, cx + r * 0.97f, cy + r * 0.3f)
+        c.drawOval(oval, strokeP)
+        c.restore()
+    }
+
+    // 3 · Hiper actualización: un cometa con cola, en movimiento.
+    private fun drawCometa(c: Canvas, cx: Float, cy: Float, r: Float) {
+        strokeP.strokeCap = Paint.Cap.ROUND
+        for (k in 0..2) {
+            strokeP.strokeWidth = r * (0.34f - k * 0.1f)
+            strokeP.alpha = 235 - k * 75
+            val off = k * r * 0.17f
+            c.drawLine(cx - r * 0.42f + off, cy - r * 0.42f + off, cx + r * 0.55f, cy + r * 0.55f, strokeP)
+        }
+        strokeP.alpha = 255
+        c.drawCircle(cx - r * 0.42f, cy - r * 0.42f, r * 0.33f, fillP)
+    }
+
+    // 4 · Actualización cósmica: un estallido radiante, la categoría más alta.
+    private fun drawEstallido(c: Canvas, cx: Float, cy: Float, r: Float) {
+        strokeP.strokeCap = Paint.Cap.ROUND
+        for (i in 0 until 8) {
+            val deg = i * 45f
+            val len = if (i % 2 == 0) r * 0.97f else r * 0.6f
+            strokeP.strokeWidth = if (i % 2 == 0) r * 0.17f else r * 0.1f
+            val x1 = cx + sinD(deg) * r * 0.3f
+            val y1 = cy - cosD(deg) * r * 0.3f
+            val x2 = cx + sinD(deg) * len
+            val y2 = cy - cosD(deg) * len
+            c.drawLine(x1, y1, x2, y2, strokeP)
+        }
+        c.drawCircle(cx, cy, r * 0.3f, fillP)
     }
 }
 

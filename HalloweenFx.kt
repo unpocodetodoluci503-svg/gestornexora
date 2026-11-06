@@ -135,8 +135,19 @@ private class HwHost : Application.ActivityLifecycleCallbacks {
     override fun onActivityResumed(activity: Activity) {
         if (activity !is MainActivity) return
         try {
+            val enabled = try {
+                activity.getSharedPreferences("nexora", Context.MODE_PRIVATE).getBoolean("hwThemeOn", true)
+            } catch (e: Exception) {
+                true
+            }
             val decor = activity.window.decorView as? ViewGroup ?: return
             var fx = find(activity)
+            if (!enabled) {
+                if (fx != null) {
+                    fx.setActive(false)
+                }
+                return
+            }
             if (fx == null) {
                 fx = HwView(activity)
                 decor.addView(fx, FrameLayout.LayoutParams(-1, -1))
@@ -602,34 +613,7 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     }
 
     override fun onTouchEvent(event: MotionEvent?): Boolean = false
-    override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
-        if (ev == null) return false
-        when (ev.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                if (inMute(ev.x, ev.y)) {
-                    muteTouch = true
-                    return true
-                }
-                return false
-            }
-            MotionEvent.ACTION_UP -> {
-                if (muteTouch) {
-                    muteTouch = false
-                    if (inMute(ev.x, ev.y)) toggleMute()
-                    return true
-                }
-                return false
-            }
-            MotionEvent.ACTION_CANCEL -> {
-                if (muteTouch) {
-                    muteTouch = false
-                    return true
-                }
-                return false
-            }
-        }
-        return muteTouch
-    }
+    override fun dispatchTouchEvent(ev: MotionEvent?): Boolean = false
 
     // Cambia el degradado azul de cada pantalla por el fondo de Halloween
     private fun hookBackground() {
@@ -713,7 +697,6 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         }
         updateAnchors(dt)
         updateMoon(dt)
-        updateMute(dt)
         stepSmoke(dt)
         stepLurks(dt)
         stepPumpkins(dt)
@@ -2295,45 +2278,6 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
     }
 
     private fun drawMute(c: Canvas) {
-        if (W <= 0f || !muteInit) return
-        val r = 17f * d
-        pFill.shader = null
-        pFill.color = hc(0xB0140A1E)
-        c.drawCircle(muteX, muteY, r, pFill)
-        pStroke.shader = null
-        pStroke.color = hc(0xCCFF9A2E)
-        pStroke.strokeWidth = 1.4f * d
-        c.drawCircle(muteX, muteY, r, pStroke)
-        c.save()
-        c.translate(muteX, muteY)
-        c.scale(d, d)
-        pFill.color = hc(0xFFFFD9A0)
-        tmp.reset()
-        tmp.moveTo(-7f, -3f)
-        tmp.lineTo(-3f, -3f)
-        tmp.lineTo(2f, -8f)
-        tmp.lineTo(2f, 8f)
-        tmp.lineTo(-3f, 3f)
-        tmp.lineTo(-7f, 3f)
-        tmp.close()
-        c.drawPath(tmp, pFill)
-        if (muted) {
-            pStroke.color = hc(0xFFFF4B3A)
-            pStroke.strokeWidth = 2.2f
-            c.drawLine(-9f, 9f, 9f, -9f, pStroke)
-        } else {
-            pStroke.color = hc(0xFFFFD9A0)
-            pStroke.strokeWidth = 1.6f
-            tmp.reset()
-            tmp.moveTo(5f, -4f)
-            tmp.quadTo(8f, 0f, 5f, 4f)
-            c.drawPath(tmp, pStroke)
-            tmp.reset()
-            tmp.moveTo(7.5f, -7f)
-            tmp.quadTo(13f, 0f, 7.5f, 7f)
-            c.drawPath(tmp, pStroke)
-        }
-        c.restore()
     }
 
     // ------------------------------------------------------------ sonido sincronizado
@@ -2414,7 +2358,6 @@ private class HwView(ctx: Context) : View(ctx), Choreographer.FrameCallback {
         drawLurks(c)
         for (p in pumps) if (p.state != 0) drawPumpkin(c, p)
         drawBlastOverlay(c)
-        drawMute(c)
     }
 
     private fun skullJaw(ph: Float): Float {
