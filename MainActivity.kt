@@ -565,10 +565,24 @@ class MainActivity : Activity() {
         val a = ACENTOS[prefs.getInt("accent", 0).coerceIn(0, ACENTOS.size - 1)]
         ACC = a.c1
         ACC2 = a.c2
-        val f = FONDOS[prefs.getInt("bg", 0).coerceIn(0, FONDOS.size - 1)]
-        BG1 = f.top
-        BG2 = f.bottom
-        CARD = f.card
+        if (prefs.getBoolean("bgGrad", false)) {
+            BG1 = prefs.getInt("bgGradTop", c(0xFF0D1B4F))
+            BG2 = prefs.getInt("bgGradBottom", c(0xFF070B18))
+            CARD = mix(mix(BG1, BG2, 0.5f), Color.WHITE, 0.08f)
+        } else {
+            val f = FONDOS[prefs.getInt("bg", 0).coerceIn(0, FONDOS.size - 1)]
+            BG1 = f.top
+            BG2 = f.bottom
+            CARD = f.card
+        }
+        // Modo de apariencia: 0 Oscuro, 1 Automático (hoy se ve igual a Oscuro; cambiará
+        // cuando exista modo claro), 2 AMOLED (negro puro, sobre cualquier fondo elegido)
+        if (prefs.getInt("appMode", 0) == 2) {
+            BG1 = c(0xFF000000)
+            BG2 = c(0xFF000000)
+            CARD = c(0xFF0B0B0B)
+        }
+        CARD = alpha(CARD, prefs.getInt("cardAlpha", 255).coerceIn(90, 255))
         fontIdx = prefs.getInt("font", 0).coerceIn(0, FUENTES.size - 1)
         if (!sortReady) {
             sortIdx = prefs.getInt("sort", 0).coerceIn(0, SORTS.size - 1)
@@ -967,6 +981,29 @@ class MainActivity : Activity() {
         val selBg = prefs.getInt("bg", 0)
         val selAc = prefs.getInt("accent", 0)
         val selFo = prefs.getInt("font", 0)
+        val appMode = prefs.getInt("appMode", 0)
+
+        b.addView(sectionTitle("Modo de apariencia"))
+        val hsM = HorizontalScrollView(this)
+        hsM.isHorizontalScrollBarEnabled = false
+        val rM = LinearLayout(this)
+        val modos = listOf("Oscuro" to 0, "Automático" to 1, "AMOLED" to 2)
+        for ((label, idx) in modos) {
+            val sel = appMode == idx
+            val t = chip(label, sel) {
+                prefs.edit().putInt("appMode", idx).apply()
+                loadTheme()
+                showPersonalization()
+            }
+            rM.addView(t, lp(-2, -2).also { it.rightMargin = dp(8) })
+        }
+        hsM.addView(rM)
+        b.addView(hsM, lp(-2, -2))
+        b.addView(txt(when (appMode) {
+            1 -> "Automático sigue el modo del sistema. Por ahora se ve igual que Oscuro; cambiará cuando exista modo claro."
+            2 -> "AMOLED fuerza negro puro en toda la app, sin importar el fondo elegido abajo."
+            else -> "Oscuro usa el fondo y los colores que elijas más abajo."
+        }, 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(8) })
 
         b.addView(sectionTitle("Fondos"))
         val bgFile = File(filesDir, "fondo.jpg")
@@ -987,12 +1024,34 @@ class MainActivity : Activity() {
             tile.addView(pv, lp(dp(88), dp(60)))
             tile.addView(txt(f.nombre, 11f, if (sel) ACC2 else TXT), lp(-2, -2).also { it.topMargin = dp(6) })
             tile.setOnClickListener {
-                prefs.edit().putInt("bg", i).putBoolean("bgCustom", false).apply()
+                prefs.edit().putInt("bg", i).putBoolean("bgCustom", false).putBoolean("bgGrad", false).apply()
                 loadTheme()
                 showPersonalization()
             }
             r1.addView(tile, lp(-2, -2).also { it.rightMargin = dp(12) })
         }
+        val isGrad = prefs.getBoolean("bgGrad", false)
+        val gradTop = prefs.getInt("bgGradTop", c(0xFF2D1660))
+        val gradBottom = prefs.getInt("bgGradBottom", c(0xFF0A0716))
+        val gradTile = LinearLayout(this)
+        gradTile.orientation = LinearLayout.VERTICAL
+        val gpv = View(this)
+        val gg = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(gradTop, gradBottom))
+        gg.cornerRadius = dp(14).toFloat()
+        if (isGrad) gg.setStroke(dp(3), ACC2) else gg.setStroke(dp(1), alpha(Color.WHITE, 0x33))
+        gpv.background = gg
+        gradTile.addView(gpv, lp(dp(88), dp(60)))
+        gradTile.addView(txt("Personalizado", 11f, if (isGrad) ACC2 else TXT), lp(-2, -2).also { it.topMargin = dp(6) })
+        gradTile.setOnClickListener {
+            pickHexColor("Color de arriba", gradTop) { top ->
+                pickHexColor("Color de abajo", gradBottom) { bottom ->
+                    prefs.edit().putInt("bgGradTop", top).putInt("bgGradBottom", bottom).putBoolean("bgGrad", true).putBoolean("bgCustom", false).apply()
+                    loadTheme()
+                    showPersonalization()
+                }
+            }
+        }
+        r1.addView(gradTile, lp(-2, -2).also { it.rightMargin = dp(12) })
         val own = LinearLayout(this)
         own.orientation = LinearLayout.VERTICAL
         val ov: View
@@ -1017,7 +1076,7 @@ class MainActivity : Activity() {
         own.addView(txt(if (hasImg) "Tu imagen" else "Elegir imagen", 11f, if (custom) ACC2 else TXT), lp(-2, -2).also { it.topMargin = dp(6) })
         own.setOnClickListener {
             if (hasImg) {
-                prefs.edit().putBoolean("bgCustom", true).apply()
+                prefs.edit().putBoolean("bgCustom", true).putBoolean("bgGrad", false).apply()
                 loadTheme()
                 showPersonalization()
             } else {
@@ -1039,6 +1098,37 @@ class MainActivity : Activity() {
             b.addView(acts, lp(-2, -2).also { it.topMargin = dp(12) })
         }
         b.addView(txt("Tu imagen se oscurece un poco para que todo se lea bien.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(10) })
+
+        b.addView(sectionTitle("Transparencia de los paneles"))
+        val alphaPref = prefs.getInt("cardAlpha", 255).coerceIn(90, 255)
+        val alphaPct = ((alphaPref - 90) * 100 / (255 - 90))
+        val alphaRow = LinearLayout(this)
+        alphaRow.gravity = Gravity.CENTER_VERTICAL
+        val alphaVal = txt(alphaPct.toString() + "%", 13f, ACC2, true)
+        val seek = SeekBar(this)
+        seek.max = 100
+        seek.progress = alphaPct
+        seek.progressTintList = ColorStateList.valueOf(ACC)
+        seek.thumbTintList = ColorStateList.valueOf(ACC2)
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                alphaVal.text = p.toString() + "%"
+                if (fromUser) {
+                    val a = 90 + p * (255 - 90) / 100
+                    prefs.edit().putInt("cardAlpha", a).apply()
+                    loadTheme()
+                }
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {
+                showPersonalization()
+            }
+        })
+        alphaRow.addView(seek, lp(0, -2, 1f))
+        alphaRow.addView(alphaVal, lp(-2, -2).also { it.leftMargin = dp(10) })
+        b.addView(alphaRow, lp(-1, -2).also { it.topMargin = dp(8) })
+        b.addView(txt("Qué tan transparentes se ven las tarjetas y paneles sobre el fondo. El desenfoque real todavía no está disponible en esta versión.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(4) })
 
         b.addView(sectionTitle("Color principal"))
         val hs2 = HorizontalScrollView(this)
@@ -4247,7 +4337,7 @@ class MainActivity : Activity() {
                 }
                 File(filesDir, "fondo.jpg").outputStream().use { out -> bm.compress(Bitmap.CompressFormat.JPEG, 88, out) }
                 runOnUiThread {
-                    prefs.edit().putBoolean("bgCustom", true).apply()
+                    prefs.edit().putBoolean("bgCustom", true).putBoolean("bgGrad", false).apply()
                     loadTheme()
                     if (inViewer) showPersonalization()
                 }
@@ -6619,6 +6709,75 @@ class MainActivity : Activity() {
             return ArcOut(ok, skipped, unsafe, false, np, arcError(e, fmt), bytes)
         }
         return ArcOut(ok, skipped, unsafe, false, false, null, bytes)
+    }
+
+    // Selector de color: hex a mano + una fila de colores rápidos. Usado para armar
+    // el fondo personalizado de dos colores (Apariencia → Fondos → Personalizado).
+    private fun pickHexColor(title: String, current: Int, onPick: (Int) -> Unit) {
+        var chosen = current
+        val pg = GradientDrawable()
+        pg.shape = GradientDrawable.OVAL
+        pg.setColor(chosen)
+        pg.setStroke(dp(2), alpha(Color.WHITE, 0x40))
+        lateinit var input: EditText
+        val d = showSheet(true) { dlg ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt(title, 16f, TXT, true))
+            val row = LinearLayout(this)
+            row.gravity = Gravity.CENTER_VERTICAL
+            val pv = View(this)
+            pv.background = pg
+            row.addView(pv, lp(dp(42), dp(42)).also { it.rightMargin = dp(12) })
+            input = EditText(this)
+            input.setText(String.format("#%06X", chosen and 0xFFFFFF))
+            input.setTextColor(TXT)
+            input.setHintTextColor(MUTE)
+            input.hint = "#RRGGBB"
+            input.isSingleLine = true
+            input.background = rounded(alpha(Color.WHITE, 0x14), 12)
+            input.setPadding(dp(14), dp(10), dp(14), dp(10))
+            row.addView(input, lp(0, -2, 1f))
+            col.addView(row, lp(-1, -2).also { it.topMargin = dp(14) })
+            val sws = HorizontalScrollView(this)
+            sws.isHorizontalScrollBarEnabled = false
+            val swRow = LinearLayout(this)
+            val quick = listOf(c(0xFF0D1B4F), c(0xFF08403C), c(0xFF2D1660), c(0xFF262B38), c(0xFF0B4F82), ACC, ACC2, c(0xFF000000), c(0xFFFFFFFF))
+            for (qc in quick) {
+                val sw = View(this)
+                val swg = GradientDrawable()
+                swg.shape = GradientDrawable.OVAL
+                swg.setColor(qc)
+                swg.setStroke(dp(1), alpha(Color.WHITE, 0x33))
+                sw.background = swg
+                sw.setOnClickListener {
+                    chosen = qc
+                    pg.setColor(qc)
+                    input.setText(String.format("#%06X", qc and 0xFFFFFF))
+                }
+                swRow.addView(sw, lp(dp(32), dp(32)).also { it.rightMargin = dp(10) })
+            }
+            sws.addView(swRow)
+            col.addView(sws, lp(-1, -2).also { it.topMargin = dp(14) })
+            val apply = primaryButton("Aplicar")
+            apply.setOnClickListener {
+                val txtHex = input.text.toString().trim().removePrefix("#")
+                val parsed = try {
+                    if (txtHex.length == 6) c(0xFF000000L or txtHex.toLong(16)) else null
+                } catch (e: Exception) {
+                    null
+                }
+                if (parsed == null) {
+                    toast("Color inválido, usá el formato #RRGGBB")
+                } else {
+                    onPick(parsed)
+                    dlg.dismiss()
+                }
+            }
+            col.addView(apply, lp(-1, dp(48)).also { it.topMargin = dp(18) })
+            col
+        }
+        d.setCancelable(true)
     }
 
     private fun progressDialog(title: String, onCancel: () -> Unit): ProgUi {
