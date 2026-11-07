@@ -45,6 +45,8 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
+import android.view.SoundEffectConstants
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -495,7 +497,48 @@ class MainActivity : Activity() {
     private var aiDlLabel: TextView? = null
     @Volatile private var aiCancel = false
     private val dateFull = SimpleDateFormat("d MMM yyyy, HH:mm", Locale("es"))
-    private val thumbPx: Int get() = dp(52)
+    private val thumbPx: Int get() = dp(thumbDp() * (if (gridMode()) 13 else 10) / 10)
+
+    // ---------- ajustes de Interfaz (Personalización) ----------
+    private fun iconDp(): Int = intArrayOf(40, 52, 64)[prefs.getInt("iconSize", 1).coerceIn(0, 2)]
+    private fun thumbDp(): Int = intArrayOf(40, 52, 68)[prefs.getInt("thumbSize", 1).coerceIn(0, 2)]
+    private fun gridMode(): Boolean = prefs.getInt("viewStyle", 0) == 1
+    private fun shapeR(base: Int): Int = when (prefs.getInt("shape", 1)) {
+        0 -> maxOf(3, base / 4)
+        2 -> base * 3 / 2 + 2
+        else -> base
+    }
+    // ---------- ajustes de Efectos (Personalización) ----------
+    private fun fxOn(): Boolean = prefs.getBoolean("fxAnim", true)
+    private fun navFx(): Int = if (fxOn()) prefs.getInt("fxNav", 1).coerceIn(0, 2) else 0
+    private fun openFx(): Int = if (fxOn()) prefs.getInt("fxOpen", 0).coerceIn(0, 1) else 0
+    private fun selFx(): Int = if (fxOn()) prefs.getInt("fxSel", 1).coerceIn(0, 1) else 0
+    private var lastDirPath: String? = null
+    private var cascadeUntil = 0L
+    private var popFile: File? = null
+    private var fadeBrowser = false
+
+    // Respuesta al tocar: vibración suave y/o el clic del sistema (siguen los ajustes del teléfono)
+    private fun fx(v: View?, long: Boolean = false) {
+        if (v == null) return
+        if (prefs.getBoolean("fxHaptic", false)) {
+            v.performHapticFeedback(if (long) HapticFeedbackConstants.LONG_PRESS else HapticFeedbackConstants.VIRTUAL_KEY, HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING)
+        }
+        if (!long && prefs.getBoolean("fxSound", false)) v.playSoundEffect(SoundEffectConstants.CLICK)
+    }
+
+    // Entrada de una pantalla nueva: se desvanece o se desliza según el ajuste de transición
+    private fun pageIn(v: View, fromRight: Boolean) {
+        val m = navFx()
+        if (m == 0) return
+        v.animate().cancel()
+        v.alpha = 0f
+        if (m == 2) v.translationX = dp(if (fromRight) 26 else -26).toFloat()
+        v.animate().alpha(1f).translationX(0f).setDuration(if (m == 2) 210L else 170L).start()
+    }
+
+    private fun folderColor(): Int = if (prefs.contains("folderColor")) prefs.getInt("folderColor", ACC) else ACC
+    private fun typeColor(cat: Int, def: Int): Int = if (prefs.contains("tcol_" + cat)) prefs.getInt("tcol_" + cat, def) else def
     private val memCache = object : android.util.LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 10).toInt()) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
@@ -512,7 +555,7 @@ class MainActivity : Activity() {
     private lateinit var dir: File
     private var rootName = "Almacenamiento interno"
     private lateinit var pathView: TextView
-    private lateinit var list: ListView
+    private lateinit var list: AbsListView
     private lateinit var emptyView: TextView
     private lateinit var toolsRow: LinearLayout
     private var items: List<Item> = emptyList()
@@ -635,6 +678,17 @@ class MainActivity : Activity() {
         return g
     }
 
+    // Fondo de los paneles y hojas (showSheet, menú contextual). Con "Efecto vidrio" activo
+    // simula un vidrio esmerilado: un degradado sutil más claro arriba que se funde con CARD,
+    // ya que esta versión de Nexora no puede aplicar un desenfoque real sobre lo que hay detrás.
+    private fun panelBackground(r: Int): GradientDrawable {
+        if (!prefs.getBoolean("glassEffect", false)) return rounded(CARD, r)
+        val topTone = alpha(mix(CARD, Color.WHITE, 0.16f), minOf(255, Color.alpha(CARD) + 18))
+        val g = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(topTone, CARD, CARD))
+        g.cornerRadius = dp(r).toFloat()
+        return g
+    }
+
     private fun dot(): View {
         val v = View(this)
         val g = GradientDrawable()
@@ -682,7 +736,7 @@ class MainActivity : Activity() {
         val card = LinearLayout(this)
         card.orientation = LinearLayout.VERTICAL
         card.setPadding(dp(18), dp(18), dp(18), dp(18))
-        val g = rounded(CARD, 24)
+        val g = panelBackground(24)
         g.setStroke(dp(1), alpha(ACC2, 0x55))
         card.background = g
         card.addView(build(d))
@@ -803,6 +857,7 @@ class MainActivity : Activity() {
 
     // ---------- páginas del menú ----------
     private fun page(title: String, content: View) {
+        val entering = curPage != title
         inViewer = true
         curPage = title
         token++
@@ -822,9 +877,11 @@ class MainActivity : Activity() {
         col.addView(bar, lp(-1, -2))
         col.addView(sv, lp(-1, 0, 1f))
         setContentView(withBg(col))
+        if (entering) pageIn(col, true)
     }
 
     private fun pageFixed(title: String, content: View) {
+        val entering = curPage != title
         inViewer = true
         curPage = title
         token++
@@ -841,6 +898,7 @@ class MainActivity : Activity() {
         col.addView(bar, lp(-1, -2))
         col.addView(content, lp(-1, 0, 1f))
         setContentView(withBg(col))
+        if (entering) pageIn(col, true)
     }
 
     private fun body(): LinearLayout {
@@ -977,12 +1035,26 @@ class MainActivity : Activity() {
     }
 
     private fun showPersonalization() {
+        val keepY = if (curPage == "Personalización") (pageScroll?.scrollY ?: 0) else 0
         val b = body()
         val selBg = prefs.getInt("bg", 0)
         val selAc = prefs.getInt("accent", 0)
         val selFo = prefs.getInt("font", 0)
         val appMode = prefs.getInt("appMode", 0)
 
+        val tabsHs = HorizontalScrollView(this)
+        tabsHs.isHorizontalScrollBarEnabled = false
+        val tabsRow = LinearLayout(this)
+        for ((ti, tl) in listOf("Apariencia", "Interfaz", "Efectos", "Tipografía").withIndex()) {
+            tabsRow.addView(chip(tl, persTab == ti) {
+                persTab = ti
+                pageScroll?.scrollTo(0, 0)
+                showPersonalization()
+            }, lp(-2, -2).also { it.rightMargin = dp(8) })
+        }
+        tabsHs.addView(tabsRow)
+
+        if (persTab == 0) {
         b.addView(sectionTitle("Modo de apariencia"))
         val hsM = HorizontalScrollView(this)
         hsM.isHorizontalScrollBarEnabled = false
@@ -1128,7 +1200,14 @@ class MainActivity : Activity() {
         alphaRow.addView(seek, lp(0, -2, 1f))
         alphaRow.addView(alphaVal, lp(-2, -2).also { it.leftMargin = dp(10) })
         b.addView(alphaRow, lp(-1, -2).also { it.topMargin = dp(8) })
-        b.addView(txt("Qué tan transparentes se ven las tarjetas y paneles sobre el fondo. El desenfoque real todavía no está disponible en esta versión.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(4) })
+        b.addView(txt("Qué tan transparentes se ven las tarjetas y paneles sobre el fondo.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(4) })
+        val glassOn = prefs.getBoolean("glassEffect", false)
+        val glassChip = chip(if (glassOn) "Efecto vidrio: activado" else "Efecto vidrio: apagado", glassOn) {
+            prefs.edit().putBoolean("glassEffect", !glassOn).apply()
+            showPersonalization()
+        }
+        b.addView(glassChip, lp(-2, -2).also { it.topMargin = dp(12) })
+        b.addView(txt("Simula un vidrio esmerilado en los paneles con un brillo suave arriba. Es una simulación: Nexora todavía no puede desenfocar de verdad lo que hay detrás.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(6) })
 
         b.addView(sectionTitle("Color principal"))
         val hs2 = HorizontalScrollView(this)
@@ -1156,6 +1235,9 @@ class MainActivity : Activity() {
         hs2.addView(r2)
         b.addView(hs2)
 
+        }
+
+        if (persTab == 3) {
         b.addView(sectionTitle("Tipografía"))
         val hs3 = HorizontalScrollView(this)
         hs3.isHorizontalScrollBarEnabled = false
@@ -1177,8 +1259,12 @@ class MainActivity : Activity() {
         }
         hs3.addView(r3)
         b.addView(hs3)
-        b.addView(txt("Tus elecciones se guardan y se aplican al instante.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(18) })
+        }
 
+        if (persTab == 1) interfaceSection(b)
+        if (persTab == 2) effectsSection(b)
+
+        if (persTab == 0) {
         b.addView(sectionTitle("Temas especiales"))
         val hwOn = prefs.getBoolean("hwThemeOn", true)
         val hwTile = LinearLayout(this)
@@ -1197,8 +1283,317 @@ class MainActivity : Activity() {
         }
         b.addView(hwTile, lp(-2, -2).also { it.topMargin = dp(8) })
         b.addView(txt("Apaga o enciende la decoración animada de Halloween (luna, calaveras, calabazas y demás efectos) sin perder tu fondo, color y tipografía.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(10) })
+        }
 
-        page("Personalización", b)
+        b.addView(txt("Tus elecciones se guardan y se aplican al instante.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(18) })
+        val resetBtn = ghostButton("Restaurar personalización")
+        resetBtn.setOnClickListener { confirmReset() }
+        b.addView(resetBtn, lp(-1, dp(48)).also { it.topMargin = dp(22) })
+
+        val showPrev = prefs.getBoolean("persPreview", true)
+        val top = LinearLayout(this)
+        top.orientation = LinearLayout.VERTICAL
+        top.setPadding(dp(16), 0, dp(16), dp(2))
+        val prevHead = LinearLayout(this)
+        prevHead.gravity = Gravity.CENTER_VERTICAL
+        prevHead.addView(txt("Vista previa en vivo", 13f, MUTE, true), lp(0, -2, 1f))
+        val prevToggle = txt(if (showPrev) "Ocultar" else "Mostrar", 12f, ACC2, true)
+        prevToggle.setPadding(dp(10), dp(6), dp(4), dp(6))
+        prevToggle.setOnClickListener {
+            prefs.edit().putBoolean("persPreview", !showPrev).apply()
+            showPersonalization()
+        }
+        prevHead.addView(prevToggle)
+        top.addView(prevHead, lp(-1, -2))
+        if (showPrev) top.addView(appPreview(), lp(-1, -2))
+        top.addView(tabsHs, lp(-1, -2).also { it.topMargin = dp(10); it.bottomMargin = dp(4) })
+        val sv = ScrollView(this)
+        sv.addView(b)
+        val all = LinearLayout(this)
+        all.orientation = LinearLayout.VERTICAL
+        all.addView(top, lp(-1, -2))
+        all.addView(sv, lp(-1, 0, 1f))
+        pageFixed("Personalización", all)
+        pageScroll = sv
+        sv.post { sv.scrollTo(0, keepY) }
+    }
+
+    // Vista previa fija arriba de Personalización: fondo, color principal, tipografía, forma,
+    // íconos y un panel de ejemplo. Se redibuja con cada cambio.
+    private fun appPreview(): View {
+        val frame = FrameLayout(this)
+        val rad = dp(shapeR(18)).toFloat()
+        val bgG = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(BG1, BG2))
+        bgG.cornerRadius = rad
+        bgG.setStroke(dp(1), alpha(Color.WHITE, 0x22))
+        frame.background = bgG
+        val bm = bgBitmap
+        if (bm != null) {
+            val iv = ImageView(this)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP
+            iv.setImageBitmap(bm)
+            iv.outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(v: View, o: android.graphics.Outline) {
+                    o.setRoundRect(0, 0, v.width, v.height, rad)
+                }
+            }
+            iv.clipToOutline = true
+            frame.addView(iv, FrameLayout.LayoutParams(-1, -1))
+            val scrim = View(this)
+            scrim.background = rounded(alpha(Color.BLACK, 0x99), shapeR(18))
+            frame.addView(scrim, FrameLayout.LayoutParams(-1, -1))
+        }
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.setPadding(dp(10), dp(10), dp(10), dp(10))
+        val head = LinearLayout(this)
+        head.gravity = Gravity.CENTER_VERTICAL
+        head.addView(txt("Nexora", 16f, TXT, true), lp(0, -2, 1f))
+        val pill = txt("Nuevo", 11f, Color.WHITE, true)
+        pill.setPadding(dp(10), dp(4), dp(10), dp(4))
+        val pg = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(ACC, ACC2))
+        pg.cornerRadius = dp(shapeR(12)).toFloat()
+        pill.background = pg
+        head.addView(pill)
+        col.addView(head, lp(-1, -2))
+        col.addView(interfacePreview(if (gridMode()) 3 else 2), lp(-1, -2).also { it.topMargin = dp(8) })
+        val panel = LinearLayout(this)
+        panel.gravity = Gravity.CENTER_VERTICAL
+        panel.setPadding(dp(12), dp(9), dp(10), dp(9))
+        val pb = panelBackground(14)
+        pb.setStroke(dp(1), alpha(Color.WHITE, 0x26))
+        panel.background = pb
+        panel.addView(txt("Panel de ejemplo", 13f, TXT), lp(0, -2, 1f))
+        val ok = txt("Aplicar", 12f, Color.WHITE, true)
+        ok.setPadding(dp(12), dp(5), dp(12), dp(5))
+        ok.background = rounded(ACC, shapeR(12))
+        panel.addView(ok)
+        col.addView(panel, lp(-1, -2).also { it.topMargin = dp(8) })
+        frame.addView(col, FrameLayout.LayoutParams(-1, -2))
+        return frame
+    }
+
+    private fun confirmReset() {
+        showSheet(false) { d ->
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.addView(txt("¿Restaurar la personalización?", 18f, TXT, true))
+            col.addView(txt("Fondo (incluida tu imagen), colores, tipografía, modo de apariencia, interfaz, efectos y tema Halloween vuelven a como venían de fábrica. Tus archivos no se tocan.", 13f, MUTE), lp(-1, -2).also { it.topMargin = dp(10) })
+            val btns = LinearLayout(this)
+            val no = ghostButton("Cancelar")
+            no.setOnClickListener { d.dismiss() }
+            val yes = primaryButton("Restaurar")
+            yes.setOnClickListener {
+                d.dismiss()
+                resetPersonalization()
+            }
+            btns.addView(no, lp(0, dp(48), 1f))
+            btns.addView(yes, lp(0, dp(48), 1f).also { it.leftMargin = dp(10) })
+            col.addView(btns, lp(-1, -2).also { it.topMargin = dp(18) })
+            col
+        }
+    }
+
+    private fun resetPersonalization() {
+        val hwWasOff = !prefs.getBoolean("hwThemeOn", true)
+        val ed = prefs.edit()
+        for (k in listOf("accent", "bg", "bgCustom", "bgGrad", "bgGradTop", "bgGradBottom", "appMode", "cardAlpha", "glassEffect", "font",
+            "viewStyle", "iconSize", "thumbSize", "spacing", "shape", "folderColor", "fxAnim", "fxNav", "fxOpen", "fxSel", "fxSound", "fxHaptic",
+            "hwThemeOn", "persPreview")) ed.remove(k)
+        for (n in 1..6) ed.remove("tcol_" + n)
+        ed.apply()
+        try {
+            File(filesDir, "fondo.jpg").delete()
+        } catch (e: Exception) {
+        }
+        persTab = 0
+        loadTheme()
+        if (hwWasOff) {
+            recreate()
+        } else {
+            toast("Personalización restaurada")
+            showPersonalization()
+        }
+    }
+
+    private var persTab = 0
+
+    // Ajuste de opciones con chips (lista, tamaños, espaciado, forma...)
+    private fun prefChips(b: LinearLayout, title: String, key: String, def: Int, labels: List<String>, note: String?) {
+        b.addView(sectionTitle(title))
+        val cur = prefs.getInt(key, def).coerceIn(0, labels.size - 1)
+        val hs = HorizontalScrollView(this)
+        hs.isHorizontalScrollBarEnabled = false
+        val r = LinearLayout(this)
+        for ((i, l) in labels.withIndex()) {
+            r.addView(chip(l, i == cur) {
+                prefs.edit().putInt(key, i).apply()
+                showPersonalization()
+            }, lp(-2, -2).also { it.rightMargin = dp(8) })
+        }
+        hs.addView(r)
+        b.addView(hs)
+        if (note != null) b.addView(txt(note, 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(8) })
+    }
+
+    private val SWATCHES = listOf(c(0xFFFBBF24), c(0xFFFB923C), c(0xFFF87171), c(0xFFF472B6), c(0xFFA78BFA), c(0xFF60A5FA), c(0xFF22D3EE), c(0xFF34D399), c(0xFF94A3B8), c(0xFFE8EEFF))
+
+    // Fila de colores para elegir: el primero es el color automático (el de siempre),
+    // luego una paleta y un "+" para escribir cualquier color a mano.
+    private fun colorChoices(current: Int?, def: Int, title: String, onPick: (Int?) -> Unit): View {
+        val hs = HorizontalScrollView(this)
+        hs.isHorizontalScrollBarEnabled = false
+        val r = LinearLayout(this)
+        r.gravity = Gravity.CENTER_VERTICAL
+        fun dot(col: Int, label: String, on: Boolean, click: () -> Unit) {
+            val t = txt(label, 13f, Color.WHITE, true)
+            t.gravity = Gravity.CENTER
+            val g = GradientDrawable()
+            g.shape = GradientDrawable.OVAL
+            g.setColor(col)
+            if (on) g.setStroke(dp(3), Color.WHITE) else g.setStroke(dp(1), alpha(Color.WHITE, 0x33))
+            t.background = g
+            t.setOnClickListener { click() }
+            r.addView(t, lp(dp(34), dp(34)).also { it.rightMargin = dp(10) })
+        }
+        dot(def, "A", current == null) { onPick(null) }
+        for (sc in SWATCHES) dot(sc, "", current == sc) { onPick(sc) }
+        dot(alpha(Color.WHITE, 0x22), "+", current != null && !SWATCHES.contains(current)) {
+            pickHexColor(title, current ?: def) { picked -> onPick(picked) }
+        }
+        hs.addView(r)
+        return hs
+    }
+
+    private fun typeColorRow(b: LinearLayout, label: String, cat: Int, def: Int) {
+        b.addView(txt(label, 13f, TXT, true), lp(-2, -2).also { it.topMargin = dp(14); it.bottomMargin = dp(8) })
+        val cur = if (prefs.contains("tcol_" + cat)) prefs.getInt("tcol_" + cat, def) else null
+        b.addView(colorChoices(cur, def, "Color de " + label.lowercase()) { picked ->
+            if (picked == null) prefs.edit().remove("tcol_" + cat).apply() else prefs.edit().putInt("tcol_" + cat, picked).apply()
+            showPersonalization()
+        })
+    }
+
+    // Vista previa de cómo se ve el explorador con los ajustes de Interfaz actuales
+    private fun interfacePreview(count: Int = 4): View {
+        val grid = gridMode()
+        val spacing = prefs.getInt("spacing", 1).coerceIn(0, 2)
+        val box = LinearLayout(this)
+        box.orientation = if (grid) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        box.setPadding(dp(8), dp(8), dp(8), dp(8))
+        box.background = rounded(alpha(Color.BLACK, 0x33), shapeR(18))
+        val sample = listOf(Triple("Descargas", "Carpeta", -1), Triple("foto.jpg", "2,4 MB", 1), Triple("informe.pdf", "1,1 MB", 4), Triple("canción.mp3", "3,8 MB", 3))
+        val shown = if (grid) sample.take(minOf(3, count)) else sample.take(count)
+        for ((nm, sub, cat) in shown) {
+            val baseSz = if (cat == 1) thumbDp() else iconDp()
+            val sz = dp(if (grid) baseSz * 13 / 10 else baseSz)
+            val lead: View
+            if (cat < 0) {
+                lead = FolderIcon(this, folderColor())
+            } else {
+                val col = typeColor(cat, when (cat) {
+                    1 -> c(0xFF22D3EE)
+                    3 -> c(0xFFF472B6)
+                    else -> c(0xFFFB7185)
+                })
+                val t = txt(when (cat) {
+                    1 -> "IMG"
+                    3 -> "AUD"
+                    else -> "PDF"
+                }, if (grid) 14f else 12f, col, true)
+                t.gravity = Gravity.CENTER
+                t.background = rounded(alpha(col, 0x26), shapeR(13))
+                lead = t
+            }
+            val cardBg = rounded(alpha(CARD, 0xCC), shapeR(16))
+            if (grid) {
+                val padV = intArrayOf(8, 12, 16)[spacing]
+                val cell = LinearLayout(this)
+                cell.orientation = LinearLayout.VERTICAL
+                cell.gravity = Gravity.CENTER_HORIZONTAL
+                cell.setPadding(dp(6), dp(padV), dp(6), dp(padV))
+                cell.background = cardBg
+                cell.addView(lead, lp(sz, sz))
+                val n = txt(nm, 13f, TXT)
+                n.isSingleLine = true
+                n.ellipsize = TextUtils.TruncateAt.END
+                n.gravity = Gravity.CENTER_HORIZONTAL
+                cell.addView(n, lp(-1, -2).also { it.topMargin = dp(8) })
+                val sb = txt(sub, 11f, MUTE)
+                sb.gravity = Gravity.CENTER_HORIZONTAL
+                cell.addView(sb, lp(-1, -2))
+                val g = intArrayOf(3, 5, 8)[spacing]
+                box.addView(cell, lp(0, -1, 1f).also { it.setMargins(dp(g), dp(g), dp(g), dp(g)) })
+            } else {
+                val pv = intArrayOf(7, 11, 15)[spacing]
+                val row = LinearLayout(this)
+                row.gravity = Gravity.CENTER_VERTICAL
+                row.setPadding(dp(12), dp(pv), dp(12), dp(pv))
+                row.background = cardBg
+                row.addView(lead, lp(sz, sz))
+                val colT = LinearLayout(this)
+                colT.orientation = LinearLayout.VERTICAL
+                colT.addView(txt(nm, 15f, TXT))
+                colT.addView(txt(sub, 12f, MUTE))
+                row.addView(colT, lp(0, -2, 1f).also { it.leftMargin = dp(14) })
+                val v = intArrayOf(2, 4, 7)[spacing]
+                box.addView(row, lp(-1, -2).also { it.topMargin = dp(v); it.bottomMargin = dp(v) })
+            }
+        }
+        return box
+    }
+
+    // Interruptor con chip (activado / apagado)
+    private fun prefSwitch(b: LinearLayout, label: String, key: String, def: Boolean, note: String?) {
+        val on = prefs.getBoolean(key, def)
+        b.addView(chip(label + ": " + (if (on) "activado" else "apagado"), on) {
+            prefs.edit().putBoolean(key, !on).apply()
+            showPersonalization()
+        }, lp(-2, -2).also { it.topMargin = dp(12) })
+        if (note != null) b.addView(txt(note, 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(6) })
+    }
+
+    private fun effectsSection(b: LinearLayout) {
+        b.addView(sectionTitle("Animaciones"))
+        prefSwitch(b, "Animaciones", "fxAnim", true, "Apaga todas las animaciones y efectos de abajo de una sola vez.")
+        if (fxOn()) {
+            prefChips(b, "Transición al navegar", "fxNav", 1, listOf("Ninguna", "Desvanecer", "Deslizar"), "Al entrar a una carpeta o a una pantalla de Nexora.")
+            prefChips(b, "Al abrir una carpeta", "fxOpen", 0, listOf("Ninguno", "Cascada"), "Cascada hace que los archivos aparezcan uno tras otro.")
+            prefChips(b, "Al seleccionar archivos", "fxSel", 1, listOf("Ninguno", "Pulso"), "Un pequeño rebote en el archivo que marcas.")
+        }
+        b.addView(sectionTitle("Sonido y vibración"))
+        prefSwitch(b, "Sonidos de interacción", "fxSound", false, "Usa el clic de toque del sistema. Si lo tienes apagado en los ajustes del teléfono, no sonará.")
+        prefSwitch(b, "Vibración al tocar", "fxHaptic", false, "Una vibración corta al tocar archivos y botones, y otra más marcada al mantener pulsado. Sigue la vibración táctil del sistema.")
+        val test = chip("Probar sonido y vibración", false) {}
+        test.setOnClickListener {
+            fx(test)
+            test.postDelayed({ fx(test, true) }, 350L)
+        }
+        b.addView(test, lp(-2, -2).also { it.topMargin = dp(16) })
+    }
+
+    private fun interfaceSection(b: LinearLayout) {
+        prefChips(b, "Estilo de archivos", "viewStyle", 0, listOf("Lista", "Cuadrícula"), "Cómo se muestran los archivos y carpetas en el explorador.")
+        prefChips(b, "Tamaño de iconos", "iconSize", 1, listOf("Pequeño", "Mediano", "Grande"), null)
+        prefChips(b, "Tamaño de miniaturas", "thumbSize", 1, listOf("Pequeño", "Mediano", "Grande"), "Las miniaturas son las vistas previas de tus imágenes.")
+        prefChips(b, "Espaciado", "spacing", 1, listOf("Compacto", "Normal", "Amplio"), null)
+        prefChips(b, "Forma de los elementos", "shape", 1, listOf("Cuadrados", "Redondeados", "Muy redondeados"), "Afecta a las tarjetas, íconos y miniaturas del explorador.")
+
+        b.addView(sectionTitle("Iconos de carpetas"))
+        val fcur = if (prefs.contains("folderColor")) prefs.getInt("folderColor", ACC) else null
+        b.addView(colorChoices(fcur, ACC, "Color de las carpetas") { picked ->
+            if (picked == null) prefs.edit().remove("folderColor").apply() else prefs.edit().putInt("folderColor", picked).apply()
+            showPersonalization()
+        })
+        b.addView(txt("La letra A usa el color principal de la app.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(8) })
+
+        b.addView(sectionTitle("Colores por tipo de archivo"))
+        typeColorRow(b, "Imágenes", 1, c(0xFF22D3EE))
+        typeColorRow(b, "Vídeos", 2, c(0xFF8B5CF6))
+        typeColorRow(b, "Música", 3, c(0xFFF472B6))
+        typeColorRow(b, "Documentos", 4, c(0xFF60A5FA))
+        typeColorRow(b, "APK", 6, GREEN)
+        b.addView(txt("La letra A deja el color original de cada tipo.", 12f, MUTE), lp(-2, -2).also { it.topMargin = dp(10) })
     }
 
     private fun showSettings() {
@@ -1262,11 +1657,22 @@ class MainActivity : Activity() {
         toolsRow.setPadding(dp(16), dp(4), dp(8), dp(10))
         hs.addView(toolsRow)
 
-        list = ListView(this)
-        list.divider = null
-        list.dividerHeight = 0
+        if (gridMode()) {
+            val gv = GridView(this)
+            gv.numColumns = GridView.AUTO_FIT
+            gv.columnWidth = dp(maxOf(iconDp(), thumbDp()) * 13 / 10 + 40)
+            gv.stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            gv.horizontalSpacing = 0
+            gv.verticalSpacing = 0
+            list = gv
+        } else {
+            val lv = ListView(this)
+            lv.divider = null
+            lv.dividerHeight = 0
+            list = lv
+        }
         list.selector = ColorDrawable(Color.TRANSPARENT)
-        list.setPadding(0, dp(2), 0, dp(12))
+        if (gridMode()) list.setPadding(dp(8), dp(2), dp(8), dp(12)) else list.setPadding(0, dp(2), 0, dp(12))
         list.clipToPadding = false
         emptyView = txt("", 15f, MUTE)
         emptyView.gravity = Gravity.CENTER
@@ -1291,9 +1697,20 @@ class MainActivity : Activity() {
         selWrap.addView(selBar)
         col.addView(selWrap, lp(-1, -2).also { it.leftMargin = dp(12); it.rightMargin = dp(12); it.bottomMargin = dp(10) })
         setContentView(withBg(col))
-        list.setOnItemClickListener { _, _, i, _ -> onTap(items[i].f) }
-        list.setOnItemLongClickListener { _, v, i, _ -> onLong(items[i].f, v); true }
+        list.setOnItemClickListener { _, v, i, _ ->
+            fx(v)
+            onTap(items[i].f)
+        }
+        list.setOnItemLongClickListener { _, v, i, _ ->
+            fx(v, true)
+            onLong(items[i].f, v)
+            true
+        }
         refresh()
+        if (fadeBrowser) {
+            fadeBrowser = false
+            pageIn(col, false)
+        }
     }
 
     private fun catOf(f: File): Int {
@@ -1401,7 +1818,26 @@ class MainActivity : Activity() {
         items = sortItems(all.filter { x -> x.cat < 0 || catIdx == 0 || x.cat == catIdx })
         pathView.text = dir.absolutePath.removePrefix(root.absolutePath).ifEmpty { "/" }
         emptyView.text = if (raw == null) restrictedMsg() else if (all.isEmpty()) "Esta carpeta está vacía" else "No hay archivos de esta categoría aquí"
-        list.adapter = RowAdapter()
+        val prevPath = lastDirPath
+        val curPath = dir.absolutePath
+        lastDirPath = curPath
+        list.animate().cancel()
+        list.alpha = 1f
+        list.translationX = 0f
+        if (prevPath != null && prevPath != curPath) {
+            val fwd = curPath.length >= prevPath.length
+            val m = navFx()
+            if (m == 1) {
+                list.alpha = 0f
+                list.animate().alpha(1f).setDuration(170L).start()
+            } else if (m == 2) {
+                list.alpha = 0f
+                list.translationX = dp(if (fwd) 28 else -28).toFloat()
+                list.animate().alpha(1f).translationX(0f).setDuration(200L).start()
+            }
+            if (openFx() == 1) cascadeUntil = System.currentTimeMillis() + 700L
+        }
+        list.setAdapter(RowAdapter())
         buildTools()
         updateSelBar()
     }
@@ -1410,7 +1846,10 @@ class MainActivity : Activity() {
         val t = txt(label, 13f, if (selected) Color.WHITE else TXT, selected)
         t.setPadding(dp(14), dp(8), dp(14), dp(8))
         t.background = rounded(if (selected) ACC else alpha(Color.WHITE, 0x16), 20)
-        t.setOnClickListener { onClick() }
+        t.setOnClickListener {
+            fx(t)
+            onClick()
+        }
         return t
     }
 
@@ -1482,56 +1921,112 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun badgeOf(it: Item): Pair<String, Int> = when (it.cat) {
-        1 -> Pair("IMG", c(0xFF22D3EE))
-        2 -> Pair("VID", c(0xFF8B5CF6))
-        3 -> Pair("AUD", c(0xFFF472B6))
-        4 -> Pair(if (it.ext == "pdf") "PDF" else "DOC", if (it.ext == "pdf") c(0xFFFB7185) else c(0xFF60A5FA))
-        5 -> Pair("ZIP", c(0xFFFBBF24))
-        6 -> Pair("APK", GREEN)
-        else -> Pair(if (it.ext.isEmpty()) "•" else it.ext.uppercase().take(4), MUTE)
+    private fun badgeOf(it: Item): Pair<String, Int> {
+        val b = when (it.cat) {
+            1 -> Pair("IMG", c(0xFF22D3EE))
+            2 -> Pair("VID", c(0xFF8B5CF6))
+            3 -> Pair("AUD", c(0xFFF472B6))
+            4 -> Pair(if (it.ext == "pdf") "PDF" else "DOC", if (it.ext == "pdf") c(0xFFFB7185) else c(0xFF60A5FA))
+            5 -> Pair("ZIP", c(0xFFFBBF24))
+            6 -> Pair("APK", GREEN)
+            else -> Pair(if (it.ext.isEmpty()) "•" else it.ext.uppercase().take(4), MUTE)
+        }
+        return Pair(b.first, typeColor(it.cat, b.second))
     }
 
     private inner class RowAdapter : BaseAdapter() {
+        private val grid = gridMode()
+        private val spacing = prefs.getInt("spacing", 1).coerceIn(0, 2)
+
+        // Efectos de la fila: cascada al abrir una carpeta y pulso al seleccionar
+        private fun rowFx(v: View, position: Int, f: File) {
+            if (openFx() == 1 && System.currentTimeMillis() < cascadeUntil && position < 14) {
+                v.alpha = 0f
+                v.translationY = dp(16).toFloat()
+                v.animate().alpha(1f).translationY(0f).setStartDelay(position * 30L).setDuration(220L).start()
+            }
+            if (f == popFile) {
+                if (selFx() == 1) {
+                    v.scaleX = 0.93f
+                    v.scaleY = 0.93f
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(180L).setInterpolator(android.view.animation.OvershootInterpolator(2.2f)).start()
+                }
+            }
+        }
         override fun getCount(): Int = items.size
         override fun getItem(position: Int): Any = items[position]
         override fun getItemId(position: Int): Long = position.toLong()
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
             val it0 = items[position]
-            val wrap = FrameLayout(this@MainActivity)
-            wrap.setPadding(dp(12), dp(4), dp(12), dp(4))
-            val row = LinearLayout(this@MainActivity)
-            row.gravity = Gravity.CENTER_VERTICAL
-            row.setPadding(dp(12), dp(11), dp(12), dp(11))
             val isSel = selected.contains(it0.f)
-            val rbg = rounded(if (isSel) alpha(ACC, 0x40) else alpha(CARD, 0xCC), 16)
+            val baseSz = if (it0.cat == 1) thumbDp() else iconDp()
+            val sz = dp(if (grid) baseSz * 13 / 10 else baseSz)
+            val rIcon = shapeR(13)
+            val rbg = rounded(if (isSel) alpha(ACC, 0x40) else alpha(CARD, 0xCC), shapeR(16))
             if (isSel) rbg.setStroke(dp(2), ACC2)
-            row.background = rbg
 
-            val sz = dp(52)
+            val lead: View
             if (it0.cat < 0) {
-                row.addView(FolderIcon(this@MainActivity, ACC), lp(sz, sz))
+                lead = FolderIcon(this@MainActivity, folderColor())
             } else {
                 val k = badgeOf(it0)
-                val lead = FrameLayout(this@MainActivity)
-                val badge = txt(k.first, 12f, k.second, true)
+                val fl = FrameLayout(this@MainActivity)
+                val badge = txt(k.first, if (grid) 14f else 12f, k.second, true)
                 badge.gravity = Gravity.CENTER
-                badge.background = rounded(alpha(k.second, 0x26), 13)
-                lead.addView(badge, FrameLayout.LayoutParams(-1, -1))
+                badge.background = rounded(alpha(k.second, 0x26), rIcon)
+                fl.addView(badge, FrameLayout.LayoutParams(-1, -1))
                 if (it0.cat == 1) {
                     val iv = ImageView(this@MainActivity)
                     iv.scaleType = ImageView.ScaleType.CENTER_CROP
                     iv.outlineProvider = object : android.view.ViewOutlineProvider() {
                         override fun getOutline(v: View, o: android.graphics.Outline) {
-                            o.setRoundRect(0, 0, v.width, v.height, dp(13).toFloat())
+                            o.setRoundRect(0, 0, v.width, v.height, dp(rIcon).toFloat())
                         }
                     }
                     iv.clipToOutline = true
-                    lead.addView(iv, FrameLayout.LayoutParams(-1, -1))
+                    fl.addView(iv, FrameLayout.LayoutParams(-1, -1))
                     bindThumb(it0, iv, badge)
                 }
-                row.addView(lead, lp(sz, sz))
+                lead = fl
             }
+
+            val wrap = FrameLayout(this@MainActivity)
+            if (grid) {
+                val g = intArrayOf(3, 5, 8)[spacing]
+                wrap.setPadding(dp(g), dp(g), dp(g), dp(g))
+                val padV = intArrayOf(8, 12, 16)[spacing]
+                val cell = LinearLayout(this@MainActivity)
+                cell.orientation = LinearLayout.VERTICAL
+                cell.gravity = Gravity.CENTER_HORIZONTAL
+                cell.setPadding(dp(6), dp(padV), dp(6), dp(padV))
+                cell.background = rbg
+                cell.addView(lead, lp(sz, sz))
+                val name = txt(it0.f.name, 13f, TXT)
+                name.setLines(2)
+                name.ellipsize = TextUtils.TruncateAt.END
+                name.gravity = Gravity.CENTER_HORIZONTAL
+                cell.addView(name, lp(-1, -2).also { it.topMargin = dp(8) })
+                val sub = txt(if (it0.cat < 0) "Carpeta" else fmt(it0.size), 11f, MUTE)
+                sub.isSingleLine = true
+                sub.gravity = Gravity.CENTER_HORIZONTAL
+                cell.addView(sub, lp(-1, -2))
+                wrap.addView(cell, FrameLayout.LayoutParams(-1, -1))
+                if (selected.isNotEmpty() && it0.cat >= 0) {
+                    val mk = txt(if (isSel) "✓" else "○", 16f, if (isSel) ACC2 else MUTE, true)
+                    mk.setPadding(dp(10), dp(8), dp(10), 0)
+                    wrap.addView(mk, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
+                }
+                rowFx(wrap, position, it0.f)
+                return wrap
+            }
+
+            wrap.setPadding(dp(12), dp(intArrayOf(2, 4, 7)[spacing]), dp(12), dp(intArrayOf(2, 4, 7)[spacing]))
+            val row = LinearLayout(this@MainActivity)
+            row.gravity = Gravity.CENTER_VERTICAL
+            val pv = intArrayOf(7, 11, 15)[spacing]
+            row.setPadding(dp(12), dp(pv), dp(12), dp(pv))
+            row.background = rbg
+            row.addView(lead, lp(sz, sz))
 
             val col = LinearLayout(this@MainActivity)
             col.orientation = LinearLayout.VERTICAL
@@ -1549,6 +2044,7 @@ class MainActivity : Activity() {
                 row.addView(mk)
             }
             wrap.addView(row, FrameLayout.LayoutParams(-1, -2))
+            rowFx(wrap, position, it0.f)
             return wrap
         }
     }
@@ -1580,7 +2076,9 @@ class MainActivity : Activity() {
 
     private fun toggle(f: File) {
         if (!selected.add(f)) selected.remove(f)
+        popFile = f
         refreshSel()
+        list.postDelayed({ popFile = null }, 400L)
     }
 
     private fun refreshSel() {
@@ -1696,7 +2194,7 @@ class MainActivity : Activity() {
         val card = LinearLayout(this)
         card.orientation = LinearLayout.VERTICAL
         card.setPadding(dp(6), dp(6), dp(6), dp(6))
-        val g = rounded(CARD, 14)
+        val g = panelBackground(14)
         g.setStroke(dp(1), alpha(Color.WHITE, 0x26))
         card.background = g
         val popup = PopupWindow(card, pw, ViewGroup.LayoutParams.WRAP_CONTENT, true)
@@ -1804,7 +2302,7 @@ class MainActivity : Activity() {
         val row = LinearLayout(this)
         row.gravity = Gravity.CENTER_VERTICAL
         row.setPadding(dp(14), dp(9), dp(14), dp(9))
-        row.addView(FolderIcon(this, ACC), lp(dp(26), dp(26)))
+        row.addView(FolderIcon(this, folderColor()), lp(dp(26), dp(26)))
         val t = txt(label, 15f, TXT)
         t.isSingleLine = true
         t.ellipsize = TextUtils.TruncateAt.END
@@ -3833,7 +4331,7 @@ class MainActivity : Activity() {
     }
 
     private fun bindThumb(item: Item, iv: ImageView, badge: View) {
-        val key = item.f.absolutePath + "|" + item.mod + "|" + item.size
+        val key = item.f.absolutePath + "|" + item.mod + "|" + item.size + "|" + thumbPx
         iv.tag = key
         val hit = memCache.get(key)
         if (hit != null) {
@@ -4380,6 +4878,7 @@ class MainActivity : Activity() {
             back()
             return
         }
+        fadeBrowser = true
         showBrowser()
     }
 
@@ -5077,7 +5576,7 @@ class MainActivity : Activity() {
     }
 
     // ---------- aspecto de la limpieza ----------
-    private fun catColor(cat: Int): Int = when (cat) {
+    private fun catColor(cat: Int): Int = typeColor(cat, when (cat) {
         1 -> c(0xFF22D3EE)
         2 -> c(0xFF8B5CF6)
         3 -> c(0xFFF472B6)
@@ -5085,7 +5584,7 @@ class MainActivity : Activity() {
         5 -> c(0xFFFBBF24)
         6 -> GREEN
         else -> c(0xFF94A3B8)
-    }
+    })
 
     private fun tagChip(text: String, col: Int): TextView {
         val t = txt(text, 11f, col, true)
